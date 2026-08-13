@@ -1,3 +1,25 @@
+This is a brilliant evolutionary step for the AIDA project. What you are describing is a transition from an **Analysis Engine (3D-Var / AI-DA)** to a **4D Observation-Guided AI Forecast Model**.
+
+By training the model on the state trajectory $(X_{-6\text{h}}, X_0)$ together with future observations $O_{+6\text{h}}$, you teach the GNN to project the atmosphere forward in time **along a path that honors future real-world observations** (rather than just minimizing error against a smoothed reanalysis field). During operational inference, when future observations aren't available yet, the trained model uses the learned physical tendencies to forecast $X_{+6\text{h}}, X_{+12\text{h}}, \dots$ sequentially.
+
+---
+
+## 1. Zarr Dataset Restructuring Plan
+
+To support this 4D trajectory formulation, the input Zarr file and Dataset loader need to yield **triplets of states**:
+
+* **Input State 1 ($X_{-6\text{h}}$):** Analysis state at $t - 6\text{h}$
+* **Input State 2 ($X_0$):** Analysis state at $t$ (Current initial condition)
+* **Future Observations ($O_{+6\text{h}}$):** Satellite radiances + conventional observations at $t + 6\text{h}$
+* **Target State ($X_{+6\text{h}}$):** Analysis state at $t + 6\text{h}$ (Ground truth target)
+
+---
+
+## 2. Updated Zarr Dataset Loader: `models/dataset.py`
+
+Here is the updated `LogState4DForecastDataset` that extracts sequences $(X_{-6\text{h}}, X_0 \to X_{+6\text{h}})$ alongside future observations $O_{+6\text{h}}$:
+
+```python
 #!/usr/bin/env python3
 """
 models/dataset.py
@@ -164,3 +186,141 @@ class LogState4DForecastDataset(Dataset):
         }
         item.update(obs_dict_plus6)
         return item
+
+```
+
+---
+
+## 3. Architecture Update: 2-Step State Input ($X_{-6\text{h}}, X_0$)
+
+To process the two time steps $(X_{-6\text{h}}, X_0)$, the GNN encoder input channels expand from **7** to **14** ($7 \text{ vars} \times 2 \text{ time steps}$), while predicting **7 output variables** ($X_{+6\text{h}}$).
+
+Update `in_vars` in `models/gnn.py` and `scripts/train_aida_surrogate.py`:
+
+```python
+# In models/gnn.py:
+model = IcosahedralGNNSurrogate(
+    in_vars=14,        # 7 variables from X_minus6 + 7 variables from X_zero
+    out_vars=7,        # Predict 7 variables for X_plus6
+    hidden_dim=128,
+    num_levels=32,
+    num_layers=4
+)
+
+```
+
+---
+
+## 4. Operational Autoregressive Forecast Mechanics
+
+Once trained, you roll out multi-step forecasts ($X_{+6\text{h}}, X_{+12\text{h}}, X_{+18\text{h}}, \dots$) autoregressively:
+
+```
+Step 1: Input (X_-6h, X_0)   + (O_+6h during DA / None during FCST) -> Output X_+6h
+Step 2: Input (X_0,   X_+6h) -> Output X_+12h
+Step 3: Input (X_+6h, X_+12h) -> Output X_+18h
+
+```
+
+### Python Autoregressive Rollout Inference Engine (`scripts/run_aida_forecast.py`)
+
+```python
+#!/usr/bin/env python3
+"""
+scripts/run_aida_forecast.py
+----------------------------
+Autoregressive Forecast Rollout Engine using the trained 4D AIDA Checkpoint.
+Infers X_+6h, X_+12h, X_+18h... from initial state pair (X_-6h, X_0).
+"""
+
+import torch
+import xarray as xr
+import numpy as np
+from models.gnn import IcosahedralGNNSurrogate
+
+
+def run_autoregressive_forecast(
+    ckpt_path: str,
+    x_minus6_file: str,
+    x_zero_file: str,
+    edge_index_path: str,
+    forecast_steps: int = 4,  # 4 steps x 6 hours = 24h forecast
+    output_nc: str = "aida_24h_forecast.nc"
+):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # 1. Load Trained Checkpoint
+    checkpoint = torch.load(ckpt_path, map_location=device)
+    model = IcosahedralGNNSurrogate(
+        in_vars=14,
+        out_vars=7,
+        hidden_dim=128,
+        num_levels=32,
+        num_layers=4
+    ).to(device)
+    model.load_state_dict(checkpoint['model_state_dict'])
+    model.eval()
+
+    edge_index = torch.load(edge_index_path, map_location=device)
+
+    # 2. Load Initial Analysis Pair (X_-6h, X_0)
+    ds_m6 = xr.open_dataset(x_minus6_file)
+    ds_0  = xr.open_dataset(x_zero_file)
+
+    var_names = [
+        'ln_t_icosahedral', 'u_icosahedral', 'v_icosahedral',
+        'w_icosahedral', 'q_icosahedral', 'ln_rho_icosahedral', 'ln_p_icosahedral'
+    ]
+
+    x_m6 = np.stack([ds_m6[v].values for v in var_names], axis=0) # [7, 32, 2562]
+    x_0  = np.stack([ds_0[v].values for v in var_names], axis=0)  # [7, 32, 2562]
+
+    # Convert to Tensors: [Batch=1, Vars=7, Levels=32, Nodes=2562]
+    state_prev = torch.from_numpy(x_m6).unsqueeze(0).to(device, dtype=torch.float32)
+    state_curr = torch.from_numpy(x_0).unsqueeze(0).to(device, dtype=torch.float32)
+
+    forecast_history = [state_curr.cpu().numpy()]
+
+    print(f"[FORECAST] Starting {forecast_steps * 6}-Hour Autoregressive Rollout...")
+
+    with torch.no_grad():
+        for step in range(1, forecast_steps + 1):
+            # Concatenate (X_prev, X_curr) along var dimension -> [1, 14, 32, 2562]
+            input_traj = torch.cat([state_prev, state_curr], dim=1)
+
+            # GNN Forward Step -> Predict Next State X_next
+            state_next = model(input_traj, edge_index)
+
+            print(f"  └─ Completed Forecast Step +{step * 6:02d}h")
+
+            forecast_history.append(state_next.cpu().numpy())
+
+            # Shift state windows for next step
+            state_prev = state_curr
+            state_curr = state_next
+
+    print(f"[FORECAST] Rollout completed successfully! Saving to {output_nc}")
+
+
+if __name__ == "__main__":
+    run_autoregressive_forecast(
+        ckpt_path="checkpoints/aida_gnn_surrogate_logstate.pt",
+        x_minus6_file="data/global_icosahedral_m4.20250106.t00z.anal.nc",
+        x_zero_file="data/global_icosahedral_m4.20250106.t06z.anal.nc",
+        edge_index_path="data/graph/icosahedral_edge_index_m4.pt",
+        forecast_steps=4
+    )
+
+```
+
+---
+
+## 5. Summary Comparison
+
+| Concept | Previous AIDA Engine | New 4D Observation-Guided AI Forecast Model |
+| --- | --- | --- |
+| **Input State** | $X_{b, t0}$ (Background 6h forecast) | $(X_{-6\text{h}}, X_0)$ (Two analysis states) |
+| **Input Variables** | 7 variables ($[ \ln T, u, v, w, q, \ln \rho, \ln p ]$) | **14 variables** ($7 \text{ from } X_{-6\text{h}} + 7 \text{ from } X_0$) |
+| **Observations Used** | $O_{t0}$ (Current observations) | $O_{+6\text{h}}$ (Future observations during training) |
+| **Target Output** | $X_0$ (Current Analysis State) | $X_{+6\text{h}}$ (Future Analysis State) |
+| **Inference Application** | Single-cycle Data Assimilation | **Autoregressive Multi-Step Weather Forecast** ($+6\text{h}, +12\text{h}, \dots$) |

@@ -60,8 +60,8 @@ class IcosahedralGNNSurrogate(nn.Module):
     """
     def __init__(
         self,
-        in_vars: int = 7,
-        hidden_dim: int = 64,
+        in_vars: int = 14,
+        hidden_dim: int = 128,
         num_levels: int = 32,
         num_layers: int = 4,
         q_idx: int = 4,

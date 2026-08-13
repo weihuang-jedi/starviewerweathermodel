@@ -481,12 +481,21 @@ def train_model(cfg: dict):
     ).to(device)
 
     num_levels = mesh_cfg.get("num_levels", 32)
+    num_layers = model_cfg.get("num_layers", 4)
+
+    # model = IcosahedralGNNSurrogate(
+    #     in_vars=dataset.num_vars if hasattr(dataset, "num_vars") else 7,
+    #     hidden_dim=model_cfg["hidden_dim"],
+    #     num_levels=num_levels
+    # ).to(device)
 
     model = IcosahedralGNNSurrogate(
-        in_vars=dataset.num_vars if hasattr(dataset, "num_vars") else 7,
+        in_vars=14,        # 7 variables from X_minus6 + 7 variables from X_zero
+        out_vars=7,        # Predict 7 variables for X_plus6
         hidden_dim=model_cfg["hidden_dim"],
-        num_levels=num_levels
-    ).to(device)
+        num_levels=num_levels,
+        num_layers=num_layers
+    )
 
     criterion = AIDASurrogateLoss(num_levels=num_levels, **loss_cfg).to(device)
 
