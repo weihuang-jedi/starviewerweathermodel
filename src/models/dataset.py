@@ -6,6 +6,7 @@ Dataset Loaders for AIDA GNN Surrogate Model Training.
 Extracts 3D dynamic atmospheric log-state fields, 3D terrain-following geometric
 height profiles (h_3d), and 2D static topography features (static_topo: elevation + mask)
 from consolidated Zarr datasets alongside multi-sensor satellite and conventional observations.
+Includes explicit np.nan_to_num sanitization to prevent NaN propagation into model training.
 """
 
 import os
@@ -46,19 +47,20 @@ class LogStateZarrDataset(Dataset):
         self.num_vars = len(self.var_names)
 
         if 'latitude' in self.ds and 'longitude' in self.ds:
-            self.latitudes = self.ds['latitude'].values
-            self.longitudes = self.ds['longitude'].values
+            self.latitudes = np.nan_to_num(self.ds['latitude'].values, nan=0.0)
+            self.longitudes = np.nan_to_num(self.ds['longitude'].values, nan=0.0)
         else:
             self.latitudes = np.linspace(-90, 90, self.num_nodes)
             self.longitudes = np.linspace(-180, 180, self.num_nodes)
 
-        # Load Static Mesh Geometry / Topography
+        # Load Static Mesh Geometry / Topography with sanitization
         self.h_terrain = self._extract_2d_surface_feature(['h_terrain_icosahedral', 'h_terrain', 'elevation'], default_val=0.0)
         self.land_sea_mask = self._extract_2d_surface_feature(['land_sea_mask'], default_val=0.0)
 
         # Pre-pack normalized static topography features: [2, Nodes]
         # Channel 0: Surface Elevation (scaled by 10km), Channel 1: Land-Sea Mask
-        self.static_topo_np = np.stack([self.h_terrain / 10000.0, self.land_sea_mask], axis=0).astype(np.float32)
+        static_topo_raw = np.stack([self.h_terrain / 10000.0, self.land_sea_mask], axis=0)
+        self.static_topo_np = np.nan_to_num(static_topo_raw, nan=0.0, posinf=1.0, neginf=0.0).astype(np.float32)
 
         print(f"[DATASET] Loaded Multi-Array Zarr dataset from '{zarr_path}'\n"
               f"          Variables ({self.num_vars}): {self.var_names}\n"
@@ -66,20 +68,20 @@ class LogStateZarrDataset(Dataset):
               f"          Observation Directory: '{self.obs_dir}'", flush=True)
 
     def _extract_2d_surface_feature(self, candidate_names: list, default_val: float = 0.0) -> np.ndarray:
-        """Utility to safely extract static 2D surface features across naming conventions."""
+        """Utility to safely extract static 2D surface features across naming conventions with NaN cleanup."""
         for name in candidate_names:
             if name in self.ds:
                 arr = self.ds[name].values
                 if arr.ndim > 1:
                     arr = arr[0]  # Squeeze temporal dimension if present
-                return arr.astype(np.float32)
+                return np.nan_to_num(arr, nan=default_val, posinf=default_val, neginf=default_val).astype(np.float32)
         return np.full((self.num_nodes,), default_val, dtype=np.float32)
 
     def __len__(self):
         return self.num_samples
 
     def _load_observations_for_time(self, time_val):
-        """Helper to parse satellite and conventional observations for a target cycle."""
+        """Helper to parse satellite and conventional observations for a target cycle with NaN scrubbing."""
         obs_dict = {
             'obs_amsua_tb': np.full((15, self.num_nodes), 240.0, dtype=np.float32),
             'obs_amsua_mask': np.zeros((15, self.num_nodes), dtype=np.float32),
@@ -110,7 +112,7 @@ class LogStateZarrDataset(Dataset):
                 obs_file = matching_files[0]
                 try:
                     ds_obs = xr.open_dataset(obs_file)
-                    vals = ds_obs['observation_value'].values
+                    vals = np.nan_to_num(ds_obs['observation_value'].values, nan=0.0)
                     sensors = ds_obs['sensor'].values
                     channels = ds_obs['channel'].values
                     lons = ds_obs['longitude'].values
@@ -143,20 +145,28 @@ class LogStateZarrDataset(Dataset):
                 except Exception:
                     pass
 
-        return {k: torch.from_numpy(v) for k, v in obs_dict.items()}
+        # Scrub dictionary arrays
+        clean_obs = {}
+        for k, v in obs_dict.items():
+            clean_v = np.nan_to_num(v, nan=0.0, posinf=350.0, neginf=0.0).astype(np.float32)
+            clean_obs[k] = torch.from_numpy(clean_v)
+
+        return clean_obs
 
     def __getitem__(self, idx):
         # Background x(t) and Target y(t+1)
-        x_val = np.stack([self.ds[v].isel(time=idx).values for v in self.var_names], axis=0).astype(np.float32)
-        y_val = np.stack([self.ds[v].isel(time=idx + 1).values for v in self.var_names], axis=0).astype(np.float32)
+        x_val = np.stack([self.ds[v].isel(time=idx).values for v in self.var_names], axis=0)
+        y_val = np.stack([self.ds[v].isel(time=idx + 1).values for v in self.var_names], axis=0)
+
+        x_val = np.nan_to_num(x_val, nan=0.0, posinf=10.0, neginf=-10.0).astype(np.float32)
+        y_val = np.nan_to_num(y_val, nan=0.0, posinf=10.0, neginf=-10.0).astype(np.float32)
 
         # Extract 3D Terrain-Following Heights [Levels, Nodes]
         if 'h_icosahedral' in self.ds:
-            h_3d = self.ds['h_icosahedral'].isel(time=idx).values.astype(np.float32)
+            h_3d = self.ds['h_icosahedral'].isel(time=idx).values
         elif 'h' in self.ds:
-            h_3d = self.ds['h'].isel(time=idx).values.astype(np.float32)
+            h_3d = self.ds['h'].isel(time=idx).values
         else:
-            # Fallback baseline height levels (2m to 20,000m)
             baseline_h = np.array([
                 2, 10, 20, 50, 75, 100, 150, 200, 300, 400,
                 500, 750, 1000, 1250, 1500, 2000, 2500, 3000, 3500, 4000,
@@ -165,11 +175,13 @@ class LogStateZarrDataset(Dataset):
             ], dtype=np.float32)
             h_3d = np.repeat(baseline_h[:, np.newaxis], self.num_nodes, axis=1)
 
+        h_3d = np.nan_to_num(h_3d, nan=0.0, posinf=20000.0, neginf=0.0).astype(np.float32)
+
         item = {
-            'background': torch.from_numpy(x_val),             # [Vars=7, Levels=32, Nodes]
-            'target': torch.from_numpy(y_val),                 # [Vars=7, Levels=32, Nodes]
-            'h_3d': torch.from_numpy(h_3d),                     # [Levels=32, Nodes]
-            'static_topo': torch.from_numpy(self.static_topo_np), # [Static_Feats=2, Nodes]
+            'background': torch.from_numpy(x_val),                 # [Vars=7, Levels=32, Nodes]
+            'target': torch.from_numpy(y_val),                     # [Vars=7, Levels=32, Nodes]
+            'h_3d': torch.from_numpy(h_3d),                         # [Levels=32, Nodes]
+            'static_topo': torch.from_numpy(self.static_topo_np),   # [Static_Feats=2, Nodes]
         }
 
         # Load observations for time step t+1
@@ -182,6 +194,7 @@ class LogState4DForecastDataset(Dataset):
     4D Observation-Guided Forecast Dataset Loader.
     Loads [x(t-1), x(t)] 2-step trajectory inputs, predicts x(t+1) target,
     and extracts 3D terrain-following heights (h_3d) and static surface topography (static_topo).
+    Includes explicit np.nan_to_num sanitization on all extracted fields.
     """
     def __init__(self, zarr_path: str, obs_dir: str = None):
         super().__init__()
@@ -209,8 +222,8 @@ class LogState4DForecastDataset(Dataset):
         self.valid_indices = list(range(1, self.num_times - 1))
 
         if 'latitude' in self.ds and 'longitude' in self.ds:
-            self.latitudes = self.ds['latitude'].values
-            self.longitudes = self.ds['longitude'].values
+            self.latitudes = np.nan_to_num(self.ds['latitude'].values, nan=0.0)
+            self.longitudes = np.nan_to_num(self.ds['longitude'].values, nan=0.0)
         else:
             self.latitudes = np.linspace(-90, 90, self.num_nodes)
             self.longitudes = np.linspace(-180, 180, self.num_nodes)
@@ -220,7 +233,8 @@ class LogState4DForecastDataset(Dataset):
         self.land_sea_mask = self._extract_2d_surface_feature(['land_sea_mask'], default_val=0.0)
 
         # Pack normalized static features [2, Nodes]
-        self.static_topo_np = np.stack([self.h_terrain / 10000.0, self.land_sea_mask], axis=0).astype(np.float32)
+        static_topo_raw = np.stack([self.h_terrain / 10000.0, self.land_sea_mask], axis=0)
+        self.static_topo_np = np.nan_to_num(static_topo_raw, nan=0.0, posinf=1.0, neginf=0.0).astype(np.float32)
 
         print(f"[DATASET] Loaded 4D Trajectories: {len(self.valid_indices)} triples "
               f"(Nodes={self.num_nodes}, Levels={self.num_levels})", flush=True)
@@ -231,14 +245,14 @@ class LogState4DForecastDataset(Dataset):
                 arr = self.ds[name].values
                 if arr.ndim > 1:
                     arr = arr[0]
-                return arr.astype(np.float32)
+                return np.nan_to_num(arr, nan=default_val, posinf=default_val, neginf=default_val).astype(np.float32)
         return np.full((self.num_nodes,), default_val, dtype=np.float32)
 
     def __len__(self):
         return len(self.valid_indices)
 
     def _load_observations_for_time(self, time_val):
-        """Re-uses standard multi-sensor observation parser."""
+        """Re-uses standard multi-sensor observation parser with NaN sanitization."""
         return LogStateZarrDataset._load_observations_for_time(self, time_val)
 
     def __getitem__(self, idx):
@@ -250,13 +264,17 @@ class LogState4DForecastDataset(Dataset):
         x_zero   = np.stack([self.ds[v].isel(time=idx_zero).values for v in self.var_names], axis=0)
         target   = np.stack([self.ds[v].isel(time=idx_plus6).values for v in self.var_names], axis=0)
 
-        x_trajectory = np.concatenate([x_minus6, x_zero], axis=0).astype(np.float32)
+        x_trajectory = np.concatenate([x_minus6, x_zero], axis=0)
+
+        # Sanitize all dynamic trajectory arrays
+        x_trajectory = np.nan_to_num(x_trajectory, nan=0.0, posinf=10.0, neginf=-10.0).astype(np.float32)
+        target = np.nan_to_num(target, nan=0.0, posinf=10.0, neginf=-10.0).astype(np.float32)
 
         # 2. Extract 3D Terrain-Following Geometric Heights h_3d [32, 2562]
         if 'h_icosahedral' in self.ds:
-            h_3d = self.ds['h_icosahedral'].isel(time=idx_zero).values.astype(np.float32)
+            h_3d = self.ds['h_icosahedral'].isel(time=idx_zero).values
         elif 'h' in self.ds:
-            h_3d = self.ds['h'].isel(time=idx_zero).values.astype(np.float32)
+            h_3d = self.ds['h'].isel(time=idx_zero).values
         else:
             baseline_h = np.array([
                 2, 10, 20, 50, 75, 100, 150, 200, 300, 400,
@@ -266,9 +284,11 @@ class LogState4DForecastDataset(Dataset):
             ], dtype=np.float32)
             h_3d = np.repeat(baseline_h[:, np.newaxis], self.num_nodes, axis=1)
 
+        h_3d = np.nan_to_num(h_3d, nan=0.0, posinf=20000.0, neginf=0.0).astype(np.float32)
+
         item = {
             'input_trajectory': torch.from_numpy(x_trajectory),         # [In_Vars=14, Levels=32, Nodes]
-            'target_state': torch.from_numpy(target.astype(np.float32)),# [Out_Vars=7, Levels=32, Nodes]
+            'target_state': torch.from_numpy(target),                   # [Out_Vars=7, Levels=32, Nodes]
             'h_3d': torch.from_numpy(h_3d),                             # [Levels=32, Nodes]
             'static_topo': torch.from_numpy(self.static_topo_np),         # [Static_Feats=2, Nodes]
         }

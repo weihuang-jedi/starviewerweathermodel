@@ -4,7 +4,8 @@ models/gnn.py
 -------------
 Icosahedral GNN Surrogate Model Backbone for Atmospheric Data Assimilation and Forecasting.
 Supports terrain-following 3D vertical state grids, static topography feature conditioning
-(surface elevation + land-sea mask), and flexible multi-step 4D trajectory representations.
+(surface elevation + land-sea mask), flexible multi-step 4D trajectory representations,
+Xavier weight initialization, and torch.nan_to_num input sanitization.
 """
 
 import torch
@@ -104,6 +105,17 @@ class IcosahedralGNNSurrogate(nn.Module):
             nn.Linear(hidden_dim, out_vars * num_levels)
         )
 
+        # Initialize network weights to prevent gradient explosions
+        self._init_weights()
+
+    def _init_weights(self):
+        """Applies Xavier Uniform initialization to Linear layers."""
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+
     def forward(
         self,
         x_dynamic: torch.Tensor,
@@ -119,6 +131,11 @@ class IcosahedralGNNSurrogate(nn.Module):
         Returns:
             Predicted target atmospheric state fields [Batch, Out_Vars=7, Levels=32, Nodes]
         """
+        # Scrub NaNs/Infs from input state tensors
+        x_dynamic = torch.nan_to_num(x_dynamic, nan=0.0, posinf=10.0, neginf=-10.0)
+        if static_topo is not None:
+            static_topo = torch.nan_to_num(static_topo, nan=0.0, posinf=1.0, neginf=0.0)
+
         batch_size, num_vars, num_levels, num_nodes = x_dynamic.shape
 
         # Flatten vertical levels into node feature dimension -> [Batch, In_Vars * Levels, Nodes]
@@ -148,4 +165,5 @@ class IcosahedralGNNSurrogate(nn.Module):
         # Permute back to standard AIDA tensor shape -> [Batch, Out_Vars, Levels, Nodes]
         out_flat = out_flat.permute(0, 2, 1).view(batch_size, self.out_vars, self.num_levels, num_nodes)
 
-        return out_flat
+        # Final sanitization guard on network output
+        return torch.nan_to_num(out_flat, nan=0.0, posinf=15.0, neginf=-15.0)

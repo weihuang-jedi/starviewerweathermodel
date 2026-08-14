@@ -2,5 +2,7 @@ log.*
 tmp_*
 *.png
 icosahedral-grid
+icosahedral-truth
 terrain-regular-grid
 icosahedral_logstate.zarr
+all_NNJA_data_2024

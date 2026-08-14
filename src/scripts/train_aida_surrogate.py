@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-train_aida_surrogate.py
------------------------
+scripts/train_aida_surrogate.py
+-------------------------------
 AIDA GNN Surrogate Model Training Script for Icosahedral Atmospheric Grids.
 Supports terrain-following 3D height coordinates, static topography conditioning,
-differentiable satellite radiance operators (AMSU-A, IASI, HMS, ATMS, CrIS,
-SEVIRI, GSRASR, GSRCSR, AHICSR), and gradient accumulation.
+4D observation-guided forecast dataset ingestion, differentiable satellite radiance
+operators (AMSU-A, IASI, HMS, ATMS, CrIS, SEVIRI, GSRASR, GSRCSR, AHICSR),
+and gradient accumulation with NaN/Inf debugging diagnostics.
 """
 
 import argparse
@@ -21,7 +22,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from models import (
-    LogStateZarrDataset,
+    LogState4DForecastDataset,
     SyntheticAIDAStateDataset,
     generate_or_load_edge_index,
     IcosahedralGNNSurrogate,
@@ -38,7 +39,6 @@ from models.seviri import DifferentiableSEVIRIOperator
 from models.gsrasr import DifferentiableGSRASROperator
 from models.gsrcsr import DifferentiableGSRCSROperator
 from models.ahicsr import DifferentiableAHICSROperator
-from models.dataset import LogState4DForecastDataset
 
 
 def load_config(config_path: str) -> dict:
@@ -93,20 +93,17 @@ def train_epoch(
     for batch_idx, batch_data in enumerate(dataloader):
 
         if isinstance(batch_data, dict):
-            # Dynamic state trajectories [Batch, In_Vars, Levels, Nodes]
             x_batch = batch_data.get('input_trajectory', batch_data.get('background')).to(device)
             y_batch = batch_data.get('target_state', batch_data.get('target')).to(device)
 
-            # Terrain-Following Geometry Tensors
-            static_topo = batch_data.get('static_topo', None)  # [Batch, 2, Nodes] (Elevation + Mask)
+            static_topo = batch_data.get('static_topo', None)
             if static_topo is not None:
                 static_topo = static_topo.to(device)
 
-            h_3d = batch_data.get('h_3d', None)                # [Batch, 32, Nodes] (3D Terrain Heights)
+            h_3d = batch_data.get('h_3d', None)
             if h_3d is not None:
                 h_3d = h_3d.to(device)
 
-            # Observations Unpacking
             obs_amsua_tb = batch_data.get('obs_amsua_tb', None)
             obs_amsua_mask = batch_data.get('obs_amsua_mask', None)
             obs_iasi_tb = batch_data.get('obs_iasi_tb', None)
@@ -154,18 +151,18 @@ def train_epoch(
         )
         total_loss = loss
 
-        # Un-normalize physical profile fields
+        # Un-normalize physical profile fields [Batch, Levels=32, Nodes=2562]
         std_t = getattr(criterion, "std_ln_t", 1.0)
         mu_t = getattr(criterion, "mu_ln_t", 0.0)
         std_p = getattr(criterion, "std_ln_p", 1.0)
         mu_p = getattr(criterion, "mu_ln_p", 0.0)
 
-        # Infer variable layout (e.g., 7 dynamic state vars)
-        ln_T_phys = pred[:, 0, :, :].permute(0, 2, 1) * std_t + mu_t
-        ln_p_phys = pred[:, 6, :, :].permute(0, 2, 1) * std_p + mu_p
+        ln_T_phys = pred[:, 0, :, :] * std_t + mu_t
+        ln_p_phys = pred[:, 6, :, :] * std_p + mu_p
 
         t_k = torch.clamp(torch.exp(ln_T_phys), min=180.0, max=330.0)
         p_hpa = torch.clamp(torch.exp(ln_p_phys) / 100.0, min=0.01, max=1050.0)
+        p_pa = p_hpa * 100.0
 
         # 2. Conventional Observation Loss
         w_conv = loss_cfg.get("w_conv", 0.05)
@@ -211,9 +208,7 @@ def train_epoch(
         # 4. IASI Radiance Loss
         w_rad_iasi = loss_cfg.get("w_rad_iasi", 0.01)
         if obs_iasi_tb is not None:
-            p_pa = p_hpa.permute(0, 2, 1) * 100.0
-            t_k_perm = t_k.permute(0, 2, 1)
-            tb_sim = iasi_op(t_k_perm, p_pa, **op_kwargs)
+            tb_sim = iasi_op(t_k, p_pa, **op_kwargs)
             tb_obs = obs_iasi_tb.to(device)
             if tb_obs.shape[1] != 30 and tb_obs.shape[2] == 30:
                 tb_obs = tb_obs.permute(0, 2, 1)
@@ -236,9 +231,7 @@ def train_epoch(
         # 5. HMS Radiance Loss
         w_rad_hms = loss_cfg.get("w_rad_hms", 0.01)
         if obs_hms_tb is not None:
-            p_pa = p_hpa.permute(0, 2, 1) * 100.0
-            t_k_perm = t_k.permute(0, 2, 1)
-            tb_sim = hms_op(t_k_perm, p_pa, **op_kwargs)
+            tb_sim = hms_op(t_k, p_pa, **op_kwargs)
             tb_obs = obs_hms_tb.to(device)
             if tb_obs.shape[1] != 12 and tb_obs.shape[2] == 12:
                 tb_obs = tb_obs.permute(0, 2, 1)
@@ -261,9 +254,7 @@ def train_epoch(
         # 6. ATMS Radiance Loss
         w_rad_atms = loss_cfg.get("w_rad_atms", 0.01)
         if obs_atms_tb is not None:
-            p_pa = p_hpa.permute(0, 2, 1) * 100.0
-            t_k_perm = t_k.permute(0, 2, 1)
-            tb_sim = atms_op(t_k_perm, p_pa, **op_kwargs)
+            tb_sim = atms_op(t_k, p_pa, **op_kwargs)
             tb_obs = obs_atms_tb.to(device)
             if tb_obs.shape[1] != 22 and tb_obs.shape[2] == 22:
                 tb_obs = tb_obs.permute(0, 2, 1)
@@ -286,9 +277,7 @@ def train_epoch(
         # 7. CrIS Radiance Loss
         w_rad_cris = loss_cfg.get("w_rad_cris", 0.01)
         if obs_cris_tb is not None:
-            p_pa = p_hpa.permute(0, 2, 1) * 100.0
-            t_k_perm = t_k.permute(0, 2, 1)
-            tb_sim = cris_op(t_k_perm, p_pa, **op_kwargs)
+            tb_sim = cris_op(t_k, p_pa, **op_kwargs)
             tb_obs = obs_cris_tb.to(device)
             if tb_obs.shape[1] != 30 and tb_obs.shape[2] == 30:
                 tb_obs = tb_obs.permute(0, 2, 1)
@@ -311,9 +300,7 @@ def train_epoch(
         # 8. SEVIRI Radiance Loss
         w_rad_seviri = loss_cfg.get("w_rad_seviri", 0.01)
         if obs_seviri_tb is not None:
-            p_pa = p_hpa.permute(0, 2, 1) * 100.0
-            t_k_perm = t_k.permute(0, 2, 1)
-            tb_sim = seviri_op(t_k_perm, p_pa, **op_kwargs)
+            tb_sim = seviri_op(t_k, p_pa, **op_kwargs)
             tb_obs = obs_seviri_tb.to(device)
             if tb_obs.shape[1] != 8 and tb_obs.shape[2] == 8:
                 tb_obs = tb_obs.permute(0, 2, 1)
@@ -336,9 +323,7 @@ def train_epoch(
         # 9. GSRASR Radiance Loss
         w_rad_gsrasr = loss_cfg.get("w_rad_gsrasr", 0.01)
         if obs_gsrasr_tb is not None:
-            p_pa = p_hpa.permute(0, 2, 1) * 100.0
-            t_k_perm = t_k.permute(0, 2, 1)
-            tb_sim = gsrasr_op(t_k_perm, p_pa, **op_kwargs)
+            tb_sim = gsrasr_op(t_k, p_pa, **op_kwargs)
             tb_obs = obs_gsrasr_tb.to(device)
             if tb_obs.shape[1] != 10 and tb_obs.shape[2] == 10:
                 tb_obs = tb_obs.permute(0, 2, 1)
@@ -361,9 +346,7 @@ def train_epoch(
         # 10. GSRCSR Radiance Loss
         w_rad_gsrcsr = loss_cfg.get("w_rad_gsrcsr", 0.01)
         if obs_gsrcsr_tb is not None:
-            p_pa = p_hpa.permute(0, 2, 1) * 100.0
-            t_k_perm = t_k.permute(0, 2, 1)
-            tb_sim = gsrcsr_op(t_k_perm, p_pa, **op_kwargs)
+            tb_sim = gsrcsr_op(t_k, p_pa, **op_kwargs)
             tb_obs = obs_gsrcsr_tb.to(device)
             if tb_obs.shape[1] != 7 and tb_obs.shape[2] == 7:
                 tb_obs = tb_obs.permute(0, 2, 1)
@@ -386,9 +369,7 @@ def train_epoch(
         # 11. AHICSR Radiance Loss
         w_rad_ahicsr = loss_cfg.get("w_rad_ahicsr", 0.01)
         if obs_ahicsr_tb is not None:
-            p_pa = p_hpa.permute(0, 2, 1) * 100.0
-            t_k_perm = t_k.permute(0, 2, 1)
-            tb_sim = ahicsr_op(t_k_perm, p_pa, **op_kwargs)
+            tb_sim = ahicsr_op(t_k, p_pa, **op_kwargs)
             tb_obs = obs_ahicsr_tb.to(device)
             if tb_obs.shape[1] != 9 and tb_obs.shape[2] == 9:
                 tb_obs = tb_obs.permute(0, 2, 1)
@@ -410,8 +391,30 @@ def train_epoch(
 
         metrics["loss_total"] = total_loss.item()
 
-        if torch.isnan(total_loss):
-            print("[WARNING] NaN loss detected in batch! Skipping step...", flush=True)
+        # Diagnostic NaN/Inf inspection
+        loss_components = {
+            "loss_base": loss,
+            "loss_conv": loss_conv,
+            "loss_amsua": loss_rad_amsua,
+            "loss_iasi": loss_rad_iasi,
+            "loss_hms": loss_rad_hms,
+            "loss_atms": loss_rad_atms,
+            "loss_cris": loss_rad_cris,
+            "loss_seviri": loss_rad_seviri,
+            "loss_gsrasr": loss_rad_gsrasr,
+            "loss_gsrcsr": loss_rad_gsrcsr,
+            "loss_ahicsr": loss_rad_ahicsr,
+        }
+
+        nan_found = False
+        for comp_name, comp_val in loss_components.items():
+            if torch.isnan(comp_val) or torch.isinf(comp_val):
+                print(f"[DEBUG NaN] Component '{comp_name}' produced NaN/Inf! Value: {comp_val}", flush=True)
+                nan_found = True
+
+        if torch.isnan(total_loss) or torch.isinf(total_loss) or nan_found:
+            print(f"[WARNING] Skipping batch {batch_idx} due to NaN/Inf loss.", flush=True)
+            optimizer.zero_grad()
             continue
 
         loss_accum = total_loss / accum_steps
@@ -448,10 +451,9 @@ def train_model(cfg: dict):
         obs_dir = paths.get("obs_dir", None)
         if obs_dir and os.path.exists(obs_dir):
             print(f"[TRAIN] Loading dataset from Obs: '{obs_dir}'", flush=True)
-            # dataset = LogStateZarrDataset(zarr_path=zarr_path, obs_dir=obs_dir)
             dataset = LogState4DForecastDataset(zarr_path=zarr_path, obs_dir=obs_dir)
         else:
-            dataset = LogStateZarrDataset(zarr_path=zarr_path)
+            dataset = LogState4DForecastDataset(zarr_path=zarr_path)
         num_nodes = dataset.num_nodes
         lat_deg = torch.tensor(dataset.latitudes, dtype=torch.float32) if hasattr(dataset, "latitudes") else torch.linspace(-90, 90, num_nodes)
         lon_deg = torch.tensor(dataset.longitudes, dtype=torch.float32) if hasattr(dataset, "longitudes") else torch.linspace(-180, 180, num_nodes)
