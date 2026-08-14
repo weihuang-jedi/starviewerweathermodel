@@ -3,3 +3,4 @@ tmp_*
 *.png
 icosahedral-grid
 terrain-regular-grid
+icosahedral_logstate.zarr

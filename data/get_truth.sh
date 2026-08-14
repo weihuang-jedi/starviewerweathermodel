@@ -12,6 +12,11 @@ set -x
 
 cd /scratch4/NAGAPE/epic/Wei.Huang/src/starviewerweathermodel/data
 
+totalyears=1
+startyear=2026
+export res=1p00
+export fcst=f000
+
 # Activate your custom conda environment
 EAGLEhome=/scratch5/purged/Wei.Huang/src/EAGLE
 source ${EAGLEhome}/conda/etc/profile.d/conda.sh
@@ -32,7 +37,7 @@ process_hour() {
    local iflnm=gfs.t${HH}z.pgrb2b.${res}.${fcst}
    local tflnm=tmp_${YYYY}${MM}${DD}.gfs.t${HH}z.pgrb2.${res}.${fcst}
    local ncflnm=terrain-regular-grid/gfs.${YYYY}${MM}${DD}.t${HH}z.${res}.${fcst}.nc
-   local mlgridflnm=icosahedral-grid/icosahedral_logstate_m4.${YYYY}${MM}${DD}.t${HH}z.${res}.${fcst}.nc
+   local mlgridflnm=icosahedral-truth/icosahedral_logstate_m4.${YYYY}${MM}${DD}.t${HH}z.${res}.${fcst}.nc
    local datadir=/scratch4/NAGAPE/epic/Wei.Huang/src/starviewergraphcast/data
 
    if [ ! -f "${mlgridflnm}" ]; then
@@ -68,11 +73,6 @@ process_hour() {
 # Export the function and variables so subshells spawned by xargs can read them
 export -f process_hour
 export s3dir=s3://noaa-gfs-bdp-pds
-export res=1p00
-export fcst=f000
-
-totalyears=1
-startyear=2024
 dayinmonth=(31 28 31 30 31 30 31 31 30 31 30 31)
 
 # Function to generate the stream of tasks

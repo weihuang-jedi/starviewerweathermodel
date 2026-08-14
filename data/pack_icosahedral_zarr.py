@@ -1,19 +1,27 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
+"""
+pack_icosahedral_zarr.py
+------------------------
+An object-oriented packaging engine designed to compile large multi-file collections
+of 3D terrain-following unstructured icosahedral weather NetCDF files into an optimized,
+cloud-native, and ML-ready consolidated Zarr dataset for AIDA GNN surrogate models.
+"""
+
 import argparse
+import glob
 import os
+import warnings
 import xarray as xr
 import zarr
-import warnings
 from numcodecs import Blosc
 
 # Silence library notifications
 warnings.filterwarnings("ignore")
 
+
 class IcosahedralToZarrPacker:
     """
-    An object-oriented packaging engine designed to compile large multi-file collections
-    of multi-level (height) unstructured icosahedral weather NetCDF files into an optimized,
-    cloud-native, and ML-ready consolidated Zarr dataset.
+    Consolidates multi-file terrain-following icosahedral NetCDF datasets into Zarr format.
     """
     def __init__(self, file_pattern: str, output_zarr_path: str, time_chunk_size: int = 32):
         """
@@ -32,11 +40,15 @@ class IcosahedralToZarrPacker:
         Loads files lazily, builds the targeted multi-dimensional chunk graph, binds
         high-performance Blosc compression maps, and writes the Zarr store.
         """
-        print(f"[STAGE 1] Resolving multi-file netCDF collection pattern: {self.file_pattern}")
+        matched_files = sorted(glob.glob(self.file_pattern))
+        if not matched_files:
+            raise FileNotFoundError(f"[ERROR] No files matched the pattern: '{self.file_pattern}'")
+
+        print(f"[STAGE 1] Resolving {len(matched_files)} netCDF files with pattern: {self.file_pattern}")
 
         # Open files along the time dimension lazily
         self.ds = xr.open_mfdataset(
-            self.file_pattern,
+            matched_files,
             concat_dim="time",
             combine="nested",
             data_vars="minimal",
@@ -44,23 +56,39 @@ class IcosahedralToZarrPacker:
             compat="override"
         )
 
-        print("[STAGE 2] Enforcing training chunk boundaries (time, height, node alignment)...")
-        
+        print("[STAGE 2] Enforcing training chunk boundaries (time, level, node alignment)...")
+
+        # Determine vertical dimension name ('level' or 'height')
+        vert_dim = 'level' if 'level' in self.ds.dims else ('height' if 'height' in self.ds.dims else None)
+
         # Enforce time chunking on meteorological fields while keeping spatial and vertical dimensions unified
         chunk_spec = {'time': self.time_chunk_size}
-        if 'height' in self.ds.dims:
-            chunk_spec['height'] = -1
+        if vert_dim and vert_dim in self.ds.dims:
+            chunk_spec[vert_dim] = -1
         if 'node' in self.ds.dims:
             chunk_spec['node'] = -1
-            
+        if 'face' in self.ds.dims:
+            chunk_spec['face'] = -1
+
         self.ds = self.ds.chunk(chunk_spec)
 
         print(f"[STAGE 3] Building Blosc ZStandard encoding profiles (effort level={compression_level})...")
         # Configure high-efficiency BitShuffle compression mapping used by modern deep learning architectures
         compressor = Blosc(cname='zstd', clevel=compression_level, shuffle=Blosc.BITSHUFFLE)
-        encoding = {var: {'compressor': compressor} for var in self.ds.data_vars}
+        
+        # Apply encoding to data variables
+        encoding = {}
+        for var in self.ds.data_vars:
+            encoding[var] = {'compressor': compressor}
 
-        print(f"[STAGE 4] Writing consolidated Zarr warehouse destination path: {self.output_zarr_path}...")
+        print(f"[STAGE 4] Writing consolidated Zarr warehouse to: {self.output_zarr_path}...")
+        
+        # Clean up target directory if an incomplete write exists
+        if os.path.exists(self.output_zarr_path):
+            print(f" -> Removing existing Zarr directory at '{self.output_zarr_path}' for clean rewrite.")
+            import shutil
+            shutil.rmtree(self.output_zarr_path)
+
         self.ds.to_zarr(
             self.output_zarr_path,
             mode='w',
@@ -69,7 +97,7 @@ class IcosahedralToZarrPacker:
         )
 
         self.ds.close()
-        print(f"SUCCESS: Consolidated Multi-Level Icosahedral Zarr compilation finalized at '{self.output_zarr_path}'!\n")
+        print(f"SUCCESS: Consolidated Multi-Level Terrain-Following Icosahedral Zarr compilation finalized at '{self.output_zarr_path}'!\n")
 
 
 # =====================================================================
@@ -79,10 +107,10 @@ def main():
     parser = argparse.ArgumentParser(
         description="High-Speed Multi-Temporal and Multi-Level Icosahedral NetCDF to Compressed Consolidated Zarr Packer."
     )
-    parser.add_argument("-i", "--input", default="icosahedral_grid/global_icosahedral_m4.202*.nc",
-                        help="Input shell glob matching netcdf variables (default: starviewergraphcast-grid/global_icosahedral_m4.*.nc)")
+    parser.add_argument("-i", "--input", default="icosahedral-grid/icosahedral_logstate_m4.202*.nc",
+                        help="Input shell glob matching NetCDF files (default: icosahedral-grid/icosahedral_logstate_m4.202*.nc)")
     parser.add_argument("-o", "--output", default="icosahedral_logstate.zarr",
-                        help="Output Zarr path target directory (default: global_icosahedral_m4_3d_heights.zarr)")
+                        help="Output Zarr path target directory (default: icosahedral_logstate.zarr)")
     parser.add_argument("-c", "--chunk_size", type=int, default=32,
                         help="Time dimension sequence array chunk size limits (default: 32)")
     parser.add_argument("-l", "--level", type=int, default=3,
@@ -96,6 +124,7 @@ def main():
         time_chunk_size=args.chunk_size
     )
     packer.execute_conversion(compression_level=args.level)
+
 
 if __name__ == "__main__":
     main()

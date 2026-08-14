@@ -2,9 +2,10 @@
 """
 models/dataset.py
 -----------------
-4D Observation-Guided Forecast Dataset Loader for AIDA GNN.
-Loads consecutive 6-hour state trajectories (X_minus6, X_0 -> X_plus6)
-along with future observations O_plus6 for observation-conditioned forecast training.
+Dataset Loaders for AIDA GNN Surrogate Model Training.
+Extracts 3D dynamic atmospheric log-state fields, 3D terrain-following geometric
+height profiles (h_3d), and 2D static topography features (static_topo: elevation + mask)
+from consolidated Zarr datasets alongside multi-sensor satellite and conventional observations.
 """
 
 import os
@@ -15,61 +16,70 @@ import torch
 from torch.utils.data import Dataset
 
 
-class LogState4DForecastDataset(Dataset):
+class LogStateZarrDataset(Dataset):
     """
-    Dataset loader for 4D Observation-Guided AI Forecast Training.
-    
-    Given time indices [i-1, i, i+1]:
-      - x_minus6: Analysis state at t - 6h  [Variables=7, Levels=32, Nodes]
-      - x_zero   : Analysis state at t0     [Variables=7, Levels=32, Nodes]
-      - obs_plus6: Radiance & Conventional Observations at t + 6h
-      - target   : Analysis state at t + 6h [Variables=7, Levels=32, Nodes]
+    Standard Zarr Dataset Loader for Single-Step AI-DA State Ingestion.
+    Loads [t_0, t_1] background-target pairs along with 3D terrain heights (h_3d)
+    and static surface topography features (static_topo).
     """
-    def __init__(self, zarr_path: str, obs_dir: str = None, time_stride: int = 1):
+    def __init__(self, zarr_path: str, obs_dir: str = None):
         super().__init__()
         self.zarr_path = zarr_path
         self.obs_dir = obs_dir
-        self.time_stride = time_stride
 
         if not os.path.exists(zarr_path):
             raise FileNotFoundError(f"[ERROR] Zarr dataset not found at '{zarr_path}'")
 
-        print(f"[DATASET] Opening 4D Forecast Zarr dataset: '{zarr_path}'", flush=True)
+        print(f"[DATASET] Loading Zarr dataset from: '{zarr_path}'", flush=True)
         self.ds = xr.open_zarr(zarr_path)
 
-        # Expected variables: ln_t, u, v, w, q, ln_rho, ln_p
+        # Dynamic atmospheric state variable keys
         self.var_names = [
             'ln_t_icosahedral', 'u_icosahedral', 'v_icosahedral',
             'w_icosahedral', 'q_icosahedral', 'ln_rho_icosahedral', 'ln_p_icosahedral'
         ]
 
-        # Read dimensions
         self.times = self.ds['time'].values
-        self.num_times = len(self.times)
-        self.num_levels = self.ds.sizes.get('level', 32)
+        self.num_samples = len(self.times) - 1
+        self.num_levels = self.ds.sizes.get('level', self.ds.sizes.get('height', 32))
         self.num_nodes = self.ds.sizes.get('node', 2562)
         self.num_vars = len(self.var_names)
 
-        # We need at least 3 consecutive time steps: (t-6h, t0, t+6h)
-        # Valid starting indices: 1 to num_times - 2
-        self.valid_indices = list(range(1, self.num_times - 1))
-
-        if hasattr(self.ds, 'latitude') and hasattr(self.ds, 'longitude'):
+        if 'latitude' in self.ds and 'longitude' in self.ds:
             self.latitudes = self.ds['latitude'].values
             self.longitudes = self.ds['longitude'].values
         else:
             self.latitudes = np.linspace(-90, 90, self.num_nodes)
             self.longitudes = np.linspace(-180, 180, self.num_nodes)
 
-        print(f"[DATASET] Loaded 4D Trajectories: {len(self.valid_indices)} triples "
-              f"(Nodes={self.num_nodes}, Levels={self.num_levels})", flush=True)
+        # Load Static Mesh Geometry / Topography
+        self.h_terrain = self._extract_2d_surface_feature(['h_terrain_icosahedral', 'h_terrain', 'elevation'], default_val=0.0)
+        self.land_sea_mask = self._extract_2d_surface_feature(['land_sea_mask'], default_val=0.0)
+
+        # Pre-pack normalized static topography features: [2, Nodes]
+        # Channel 0: Surface Elevation (scaled by 10km), Channel 1: Land-Sea Mask
+        self.static_topo_np = np.stack([self.h_terrain / 10000.0, self.land_sea_mask], axis=0).astype(np.float32)
+
+        print(f"[DATASET] Loaded Multi-Array Zarr dataset from '{zarr_path}'\n"
+              f"          Variables ({self.num_vars}): {self.var_names}\n"
+              f"          Dimensions: Time={len(self.times)}, Levels={self.num_levels}, Nodes={self.num_nodes}\n"
+              f"          Observation Directory: '{self.obs_dir}'", flush=True)
+
+    def _extract_2d_surface_feature(self, candidate_names: list, default_val: float = 0.0) -> np.ndarray:
+        """Utility to safely extract static 2D surface features across naming conventions."""
+        for name in candidate_names:
+            if name in self.ds:
+                arr = self.ds[name].values
+                if arr.ndim > 1:
+                    arr = arr[0]  # Squeeze temporal dimension if present
+                return arr.astype(np.float32)
+        return np.full((self.num_nodes,), default_val, dtype=np.float32)
 
     def __len__(self):
-        return len(self.valid_indices)
+        return self.num_samples
 
     def _load_observations_for_time(self, time_val):
         """Helper to parse satellite and conventional observations for a target cycle."""
-        # Pre-allocate blank observation arrays
         obs_dict = {
             'obs_amsua_tb': np.full((15, self.num_nodes), 240.0, dtype=np.float32),
             'obs_amsua_mask': np.zeros((15, self.num_nodes), dtype=np.float32),
@@ -92,7 +102,6 @@ class LogState4DForecastDataset(Dataset):
         }
 
         if self.obs_dir and os.path.exists(self.obs_dir):
-            # Parse timestamp (YYYYMMDD_HH)
             dt_str = str(time_val)[:13].replace('-', '').replace('T', '.t') + 'z'
             obs_file_pattern = os.path.join(self.obs_dir, f"obs_unified.*{dt_str}*.nc")
             matching_files = glob.glob(obs_file_pattern)
@@ -106,11 +115,9 @@ class LogState4DForecastDataset(Dataset):
                     channels = ds_obs['channel'].values
                     lons = ds_obs['longitude'].values
 
-                    # Map longitude to node index
                     node_idx = ((lons + 180.0) / 360.0 * (self.num_nodes - 1)).astype(int)
                     node_idx = np.clip(node_idx, 0, self.num_nodes - 1)
 
-                    # Sensor mapping rules
                     sensor_specs = [
                         ('amsua', 15, 'obs_amsua_tb', 'obs_amsua_mask', 1),
                         ('iasi', 30, 'obs_iasi_tb', 'obs_iasi_mask', 1),
@@ -139,28 +146,180 @@ class LogState4DForecastDataset(Dataset):
         return {k: torch.from_numpy(v) for k, v in obs_dict.items()}
 
     def __getitem__(self, idx):
+        # Background x(t) and Target y(t+1)
+        x_val = np.stack([self.ds[v].isel(time=idx).values for v in self.var_names], axis=0).astype(np.float32)
+        y_val = np.stack([self.ds[v].isel(time=idx + 1).values for v in self.var_names], axis=0).astype(np.float32)
+
+        # Extract 3D Terrain-Following Heights [Levels, Nodes]
+        if 'h_icosahedral' in self.ds:
+            h_3d = self.ds['h_icosahedral'].isel(time=idx).values.astype(np.float32)
+        elif 'h' in self.ds:
+            h_3d = self.ds['h'].isel(time=idx).values.astype(np.float32)
+        else:
+            # Fallback baseline height levels (2m to 20,000m)
+            baseline_h = np.array([
+                2, 10, 20, 50, 75, 100, 150, 200, 300, 400,
+                500, 750, 1000, 1250, 1500, 2000, 2500, 3000, 3500, 4000,
+                4500, 5000, 6000, 7000, 8000, 9000, 10000, 11500, 13000, 15000,
+                17500, 20000
+            ], dtype=np.float32)
+            h_3d = np.repeat(baseline_h[:, np.newaxis], self.num_nodes, axis=1)
+
+        item = {
+            'background': torch.from_numpy(x_val),             # [Vars=7, Levels=32, Nodes]
+            'target': torch.from_numpy(y_val),                 # [Vars=7, Levels=32, Nodes]
+            'h_3d': torch.from_numpy(h_3d),                     # [Levels=32, Nodes]
+            'static_topo': torch.from_numpy(self.static_topo_np), # [Static_Feats=2, Nodes]
+        }
+
+        # Load observations for time step t+1
+        item.update(self._load_observations_for_time(self.times[idx + 1]))
+        return item
+
+
+class LogState4DForecastDataset(Dataset):
+    """
+    4D Observation-Guided Forecast Dataset Loader.
+    Loads [x(t-1), x(t)] 2-step trajectory inputs, predicts x(t+1) target,
+    and extracts 3D terrain-following heights (h_3d) and static surface topography (static_topo).
+    """
+    def __init__(self, zarr_path: str, obs_dir: str = None):
+        super().__init__()
+        self.zarr_path = zarr_path
+        self.obs_dir = obs_dir
+
+        if not os.path.exists(zarr_path):
+            raise FileNotFoundError(f"[ERROR] Zarr dataset not found at '{zarr_path}'")
+
+        print(f"[DATASET] Loading 4D Forecast Zarr dataset from: '{zarr_path}'", flush=True)
+        self.ds = xr.open_zarr(zarr_path)
+
+        self.var_names = [
+            'ln_t_icosahedral', 'u_icosahedral', 'v_icosahedral',
+            'w_icosahedral', 'q_icosahedral', 'ln_rho_icosahedral', 'ln_p_icosahedral'
+        ]
+
+        self.times = self.ds['time'].values
+        self.num_times = len(self.times)
+        self.num_levels = self.ds.sizes.get('level', self.ds.sizes.get('height', 32))
+        self.num_nodes = self.ds.sizes.get('node', 2562)
+        self.num_vars = len(self.var_names)
+
+        # Requires triples: (t-6h, t0, t+6h) -> valid indices: 1 to num_times-2
+        self.valid_indices = list(range(1, self.num_times - 1))
+
+        if 'latitude' in self.ds and 'longitude' in self.ds:
+            self.latitudes = self.ds['latitude'].values
+            self.longitudes = self.ds['longitude'].values
+        else:
+            self.latitudes = np.linspace(-90, 90, self.num_nodes)
+            self.longitudes = np.linspace(-180, 180, self.num_nodes)
+
+        # Extract Static Surface Topography Features
+        self.h_terrain = self._extract_2d_surface_feature(['h_terrain_icosahedral', 'h_terrain', 'elevation'], default_val=0.0)
+        self.land_sea_mask = self._extract_2d_surface_feature(['land_sea_mask'], default_val=0.0)
+
+        # Pack normalized static features [2, Nodes]
+        self.static_topo_np = np.stack([self.h_terrain / 10000.0, self.land_sea_mask], axis=0).astype(np.float32)
+
+        print(f"[DATASET] Loaded 4D Trajectories: {len(self.valid_indices)} triples "
+              f"(Nodes={self.num_nodes}, Levels={self.num_levels})", flush=True)
+
+    def _extract_2d_surface_feature(self, candidate_names: list, default_val: float = 0.0) -> np.ndarray:
+        for name in candidate_names:
+            if name in self.ds:
+                arr = self.ds[name].values
+                if arr.ndim > 1:
+                    arr = arr[0]
+                return arr.astype(np.float32)
+        return np.full((self.num_nodes,), default_val, dtype=np.float32)
+
+    def __len__(self):
+        return len(self.valid_indices)
+
+    def _load_observations_for_time(self, time_val):
+        """Re-uses standard multi-sensor observation parser."""
+        return LogStateZarrDataset._load_observations_for_time(self, time_val)
+
+    def __getitem__(self, idx):
         t_idx = self.valid_indices[idx]
+        idx_minus6, idx_zero, idx_plus6 = t_idx - 1, t_idx, t_idx + 1
 
-        # Extract 3 consecutive states from Zarr
-        idx_minus6 = t_idx - 1
-        idx_zero   = t_idx
-        idx_plus6  = t_idx + 1
-
-        # Extract states: shape [Vars=7, Levels=32, Nodes=2562]
+        # 1. Dynamic state trajectories [7, 32, 2562] x 2 -> [14, 32, 2562]
         x_minus6 = np.stack([self.ds[v].isel(time=idx_minus6).values for v in self.var_names], axis=0)
         x_zero   = np.stack([self.ds[v].isel(time=idx_zero).values for v in self.var_names], axis=0)
         target   = np.stack([self.ds[v].isel(time=idx_plus6).values for v in self.var_names], axis=0)
 
-        # Concatenate x_minus6 and x_zero along variable channel dimension -> shape [14, 32, 2562]
         x_trajectory = np.concatenate([x_minus6, x_zero], axis=0).astype(np.float32)
 
-        # Load observations for time t+6h (O_plus6)
-        time_plus6 = self.times[idx_plus6]
-        obs_dict_plus6 = self._load_observations_for_time(time_plus6)
+        # 2. Extract 3D Terrain-Following Geometric Heights h_3d [32, 2562]
+        if 'h_icosahedral' in self.ds:
+            h_3d = self.ds['h_icosahedral'].isel(time=idx_zero).values.astype(np.float32)
+        elif 'h' in self.ds:
+            h_3d = self.ds['h'].isel(time=idx_zero).values.astype(np.float32)
+        else:
+            baseline_h = np.array([
+                2, 10, 20, 50, 75, 100, 150, 200, 300, 400,
+                500, 750, 1000, 1250, 1500, 2000, 2500, 3000, 3500, 4000,
+                4500, 5000, 6000, 7000, 8000, 9000, 10000, 11500, 13000, 15000,
+                17500, 20000
+            ], dtype=np.float32)
+            h_3d = np.repeat(baseline_h[:, np.newaxis], self.num_nodes, axis=1)
 
         item = {
-            'input_trajectory': torch.from_numpy(x_trajectory),  # [In_Vars=14, Levels=32, Nodes]
-            'target_state': torch.from_numpy(target.astype(np.float32)), # [Out_Vars=7, Levels=32, Nodes]
+            'input_trajectory': torch.from_numpy(x_trajectory),         # [In_Vars=14, Levels=32, Nodes]
+            'target_state': torch.from_numpy(target.astype(np.float32)),# [Out_Vars=7, Levels=32, Nodes]
+            'h_3d': torch.from_numpy(h_3d),                             # [Levels=32, Nodes]
+            'static_topo': torch.from_numpy(self.static_topo_np),         # [Static_Feats=2, Nodes]
         }
-        item.update(obs_dict_plus6)
+
+        # Load future observations O_plus6
+        item.update(self._load_observations_for_time(self.times[idx_plus6]))
         return item
+
+
+class SyntheticAIDAStateDataset(Dataset):
+    """Fallback Synthetic Dataset Generator for Testing."""
+    def __init__(self, num_samples: int = 100, num_nodes: int = 2562, num_levels: int = 32):
+        super().__init__()
+        self.num_samples = num_samples
+        self.num_nodes = num_nodes
+        self.num_levels = num_levels
+
+        self.data_x = np.random.randn(num_samples, 7, num_levels, num_nodes).astype(np.float32)
+        self.data_y = self.data_x + 0.05 * np.random.randn(num_samples, 7, num_levels, num_nodes).astype(np.float32)
+
+        baseline_h = np.linspace(2, 20000, num_levels, dtype=np.float32)
+        self.h_3d = np.repeat(baseline_h[:, np.newaxis], num_nodes, axis=1)
+        self.static_topo = np.random.randn(2, num_nodes).astype(np.float32)
+
+    def __len__(self):
+        return self.num_samples
+
+    def __getitem__(self, idx):
+        return {
+            'background': torch.from_numpy(self.data_x[idx]),
+            'input_trajectory': torch.from_numpy(np.concatenate([self.data_x[idx], self.data_x[idx]], axis=0)),
+            'target': torch.from_numpy(self.data_y[idx]),
+            'target_state': torch.from_numpy(self.data_y[idx]),
+            'h_3d': torch.from_numpy(self.h_3d),
+            'static_topo': torch.from_numpy(self.static_topo),
+            'obs_amsua_tb': torch.full((15, self.num_nodes), 240.0, dtype=torch.float32),
+            'obs_amsua_mask': torch.ones((15, self.num_nodes), dtype=torch.float32),
+            'obs_iasi_tb': torch.full((30, self.num_nodes), 240.0, dtype=torch.float32),
+            'obs_iasi_mask': torch.ones((30, self.num_nodes), dtype=torch.float32),
+            'obs_hms_tb': torch.full((12, self.num_nodes), 240.0, dtype=torch.float32),
+            'obs_hms_mask': torch.ones((12, self.num_nodes), dtype=torch.float32),
+            'obs_atms_tb': torch.full((22, self.num_nodes), 240.0, dtype=torch.float32),
+            'obs_atms_mask': torch.ones((22, self.num_nodes), dtype=torch.float32),
+            'obs_cris_tb': torch.full((30, self.num_nodes), 240.0, dtype=torch.float32),
+            'obs_cris_mask': torch.ones((30, self.num_nodes), dtype=torch.float32),
+            'obs_seviri_tb': torch.full((8, self.num_nodes), 240.0, dtype=torch.float32),
+            'obs_seviri_mask': torch.ones((8, self.num_nodes), dtype=torch.float32),
+            'obs_gsrasr_tb': torch.full((10, self.num_nodes), 240.0, dtype=torch.float32),
+            'obs_gsrasr_mask': torch.ones((10, self.num_nodes), dtype=torch.float32),
+            'obs_gsrcsr_tb': torch.full((7, self.num_nodes), 240.0, dtype=torch.float32),
+            'obs_gsrcsr_mask': torch.ones((7, self.num_nodes), dtype=torch.float32),
+            'obs_ahicsr_tb': torch.full((9, self.num_nodes), 240.0, dtype=torch.float32),
+            'obs_ahicsr_mask': torch.ones((9, self.num_nodes), dtype=torch.float32),
+        }
