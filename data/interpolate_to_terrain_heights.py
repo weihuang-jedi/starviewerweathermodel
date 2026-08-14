@@ -46,9 +46,12 @@ class TerrainHeightInterpolator:
             lons_search = np.where(lons_search > 180, lons_search - 360, lons_search)
 
         # Nearest-neighbor interpolation of high-resolution ETOPO to GFS grid
+        lat_dim = "lat" if "lat" in z_var.dims else "latitude"
+        lon_dim = "lon" if "lon" in z_var.dims else "longitude"
+
         h_terrain = z_var.sel(
-            lat=xr.DataArray(lats, dims="lat"),
-            lon=xr.DataArray(lons_search, dims="lon"),
+            {lat_dim: xr.DataArray(lats, dims="lat"),
+             lon_dim: xr.DataArray(lons_search, dims="lon")},
             method="nearest"
         ).values
 
@@ -123,7 +126,6 @@ class TerrainHeightInterpolator:
         h_terrain = self._load_and_align_topography(lats, lons)  # [lats, lons]
 
         # Compute 3D target terrain-following heights: h = H_max - eta * (H_max - H_terrain)
-        # Shape: [n_levels, n_lats, n_lons]
         n_levs, n_lats, n_lons = z_src.shape
         n_targets = len(self.target_levels)
 
@@ -131,48 +133,68 @@ class TerrainHeightInterpolator:
         h_terrain_3d = h_terrain[np.newaxis, :, :]   # [1, n_lats, n_lons]
         target_h_3d = self.height_max - eta_3d * (self.height_max - h_terrain_3d)  # [n_targets, lats, lons]
 
-        print("[INTERP] Executing vectorized vertical interpolation to terrain-following levels...")
+        print("[INTERP] Executing fully vectorized vertical interpolation (fast)...")
 
-        # Ensure vertical profiles are sorted ascending by source height z_src
+        # Sort vertical profiles ascending by source height z_src
         sort_idx = np.argsort(z_src, axis=0)  # [n_levs, lats, lons]
         z_sorted = np.take_along_axis(z_src, sort_idx, axis=0)  # [n_levs, lats, lons]
 
-        # Storage containers
-        out_shape = (n_targets, n_lats, n_lons)
-        interpolated_fields = {k: np.empty(out_shape, dtype=np.float32) for k in active_keys}
-        interpolated_fields['p'] = np.empty(out_shape, dtype=np.float32)
-
-        # Reshape to 2D matrices [n_levs, spatial_points] for optimized NumPy vectorization
+        # Flatten spatial dimensions for vectorized batch interpolation: [n_levs, n_spatial]
         n_spatial = n_lats * n_lons
         z_2d = z_sorted.reshape(n_levs, n_spatial)
         target_h_2d = target_h_3d.reshape(n_targets, n_spatial)
 
-        # Broadcast pressure across spatial dimensions
-        p_2d = np.repeat(pressures[:, np.newaxis], n_spatial, axis=1)
-        p_sorted_2d = np.take_along_axis(p_2d, sort_idx.reshape(n_levs, n_spatial), axis=0)
+        # Prepare pressure 2D array
+        p_3d = np.broadcast_to(pressures[:, np.newaxis, np.newaxis], z_src.shape)
+        p_sorted_2d = np.take_along_axis(p_3d, sort_idx, axis=0).reshape(n_levs, n_spatial)
 
-        # Vectorized linear interpolation column-by-column
-        for s in range(n_spatial):
-            z_col = z_2d[:, s]
-            target_cols = target_h_2d[:, s]
+        # Storage containers
+        out_shape = (n_targets, n_lats, n_lons)
+        interpolated_fields = {k: np.empty((n_targets, n_spatial), dtype=np.float32) for k in active_keys}
+        interpolated_fields['p'] = np.empty((n_targets, n_spatial), dtype=np.float32)
 
-            # Interpolate pressure
-            interpolated_fields['p'].reshape(n_targets, n_spatial)[:, s] = np.interp(
-                target_cols, z_col, p_sorted_2d[:, s]
-            )
+        # --- FAST VECTORIZED 2D INTERPOLATION ---
+        # Find upper bounding index for each target level in z_2d using searchsorted
+        for t_idx in range(n_targets):
+            h_target_layer = target_h_2d[t_idx, :]  # [n_spatial]
 
-            # Interpolate core active weather variables
+            # Vectorized binary search across sorted height profiles
+            # Finds index i such that z_2d[i-1, s] <= h_target_layer[s] < z_2d[i, s]
+            idx_upper = np.sum(z_2d < h_target_layer[np.newaxis, :], axis=0)
+            idx_upper = np.clip(idx_upper, 1, n_levs - 1)
+            idx_lower = idx_upper - 1
+
+            s_indices = np.arange(n_spatial)
+
+            z0 = z_2d[idx_lower, s_indices]
+            z1 = z_2d[idx_upper, s_indices]
+            dz = np.where(z1 == z0, 1.0e-5, z1 - z0)
+            weights = (h_target_layer - z0) / dz  # [n_spatial]
+
+            # Vectorized linear interpolation for pressure
+            p0 = p_sorted_2d[idx_lower, s_indices]
+            p1 = p_sorted_2d[idx_upper, s_indices]
+            interpolated_fields['p'][t_idx, :] = p0 + weights * (p1 - p0)
+
+            # Vectorized linear interpolation for active fields
             for key in active_keys:
                 var_val = isobaric_ds[var_map[key]].values
-                var_sorted = np.take_along_axis(var_val, sort_idx, axis=0).reshape(n_levs, n_spatial)
-                interp_vals = np.interp(target_cols, z_col, var_sorted[:, s])
+                var_sorted_2d = np.take_along_axis(var_val, sort_idx, axis=0).reshape(n_levs, n_spatial)
+
+                v0 = var_sorted_2d[idx_lower, s_indices]
+                v1 = var_sorted_2d[idx_upper, s_indices]
+                interp_val = v0 + weights * (v1 - v0)
 
                 if key == 'q':
-                    interp_vals = np.clip(interp_vals, 1.0e-7, None)
+                    interp_val = np.clip(interp_val, 1.0e-7, None)
 
-                interpolated_fields[key].reshape(n_targets, n_spatial)[:, s] = interp_vals
+                interpolated_fields[key][t_idx, :] = interp_val
 
-        print("[PACKAGE] Structuring final NetCDF4 container...")
+        # Reshape fields back to 3D grid [n_targets, n_lats, n_lons]
+        for key in interpolated_fields:
+            interpolated_fields[key] = interpolated_fields[key].reshape(out_shape)
+
+        print("[PACKAGE] Structuring final NetCDF4 dataset container...")
 
         # Coordinates definition
         coords = {
@@ -213,6 +235,7 @@ class TerrainHeightInterpolator:
                 isobaric_ds[file_key].attrs
             )
 
+        os.makedirs(os.path.dirname(self.output_path) or ".", exist_ok=True)
         ds_out = xr.Dataset(
             data_vars=data_vars,
             coords=coords,

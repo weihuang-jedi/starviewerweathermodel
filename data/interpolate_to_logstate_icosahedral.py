@@ -3,10 +3,11 @@
 interpolate_to_logstate_icosahedral.py
 --------------------------------------
 End-to-end processing pipeline that:
-  1. Interpolates regular lat/lon NetCDF weather fields onto a 1D icosahedral grid layout.
-  2. Directly converts thermodynamic fields (T, p) into log-state space (ln_t, ln_p, ln_rho).
-  3. Computes air density (rho) via Ideal Gas Law if not provided.
-  4. Formats CF-1.8/UGRID compliant output ready for AIDA GNN surrogate model ingestion.
+  1. Interpolates regular lat/lon terrain-following NetCDF weather fields onto a 1D icosahedral grid layout.
+  2. Horizontally maps 3D geometric terrain-following height profiles h(level, lat, lon) to h(level, node).
+  3. Directly converts thermodynamic fields (T, p) into log-state space (ln_t, ln_p, ln_rho).
+  4. Computes air density (rho) via Ideal Gas Law if not provided.
+  5. Formats CF-1.8/UGRID compliant output ready for AIDA GNN surrogate model ingestion.
 """
 
 import argparse
@@ -36,7 +37,8 @@ def find_var(data_vars, name_list):
 
 class IcosahedralLogStatePipeline:
     """
-    Unified multi-level spatial interpolator and thermodynamic log-state transformation engine.
+    Unified multi-level spatial interpolator for terrain-following grids onto icosahedral nodes
+    and thermodynamic log-state transformation engine.
     """
     def __init__(self, master_mesh_path: str):
         self.master_mesh_path = master_mesh_path
@@ -61,11 +63,16 @@ class IcosahedralLogStatePipeline:
         return ds_src
 
     def process_file(self, input_nc: str, output_nc: str) -> None:
-        print(f"\n[AIDA PIPELINE] Processing: {input_nc}")
+        print(f"\n[AIDA PIPELINE] Processing Terrain-Following Grid: {input_nc}")
         ds_src = xr.open_dataset(input_nc)
 
+        # Identify vertical level dimension ('level' or 'height')
+        vert_dim = 'level' if 'level' in ds_src.dims else ('height' if 'height' in ds_src.dims else None)
+        if vert_dim is None:
+            raise KeyError("Could not identify vertical level/height dimension in input dataset.")
+
         # 1. Identify target data payload variables
-        coords_keys = {"time", "step", "valid_time", "height", "lat", "lon", "latitude", "longitude"}
+        coords_keys = {"time", "step", "valid_time", vert_dim, "target_level", "eta", "lat", "lon", "latitude", "longitude"}
         target_vars = [v for v in ds_src.data_vars if v not in coords_keys]
 
         if not target_vars:
@@ -86,7 +93,7 @@ class IcosahedralLogStatePipeline:
         # 2. Apply Circular Longitude Padding
         padded_ds = self._apply_circular_padding(ds_src, lon_key)
 
-        # 3. Horizontal Linear Interpolation onto Mesh Vertices
+        # 3. Horizontal Linear Interpolation onto Icosahedral Vertices
         mesh_lons = np.mod(self.ds_mesh['longitude'].values, 360.0)
         mesh_lats = self.ds_mesh['latitude'].values
 
@@ -96,7 +103,7 @@ class IcosahedralLogStatePipeline:
         interpolated_fields = {}
 
         for var in target_vars:
-            print(f"  -> Interpolating variable: '{var}'")
+            print(f"  -> Interpolating field to icosahedral grid: '{var}'")
             cube = padded_ds[var].interp(
                 {lon_key: target_lon, lat_key: target_lat},
                 method="linear",
@@ -109,7 +116,6 @@ class IcosahedralLogStatePipeline:
             if var in ['q', 'qv', 'q_icosahedral']:
                 var_data = np.clip(var_data, 0.0, None)
 
-            # Standardize base output key name
             clean_var_name = var.replace("_icosahedral", "")
             interpolated_fields[clean_var_name] = (var_data, ds_src[var].attrs)
 
@@ -126,23 +132,26 @@ class IcosahedralLogStatePipeline:
         T_val = np.clip(interpolated_fields[t_key][0], 1e-5, None)
         p_val = np.clip(interpolated_fields[p_key][0], 1e-5, None)
 
+        # Auto-convert pressure to Pa if recorded in hPa
+        p_pa = p_val * 100.0 if np.nanmean(p_val) < 2000.0 else p_val
+
         if rho_key:
             rho_val = np.clip(interpolated_fields[rho_key][0], 1e-8, None)
         else:
             # Ideal Gas Law derivation: rho = p / (R_d * T)
-            rho_val = p_val / (R_D * T_val)
+            rho_val = p_pa / (R_D * T_val)
 
         ln_t_val = np.log(T_val)
-        ln_p_val = np.log(p_val)
+        ln_p_val = np.log(p_pa)
         ln_rho_val = np.log(rho_val)
 
         data_vars_out = {
-            "ln_t_icosahedral": (["height", "node"], ln_t_val, {"long_name": "Logarithm of Temperature", "units": "ln(K)"}),
-            "ln_p_icosahedral": (["height", "node"], ln_p_val, {"long_name": "Logarithm of Pressure", "units": "ln(Pa)"}),
-            "ln_rho_icosahedral": (["height", "node"], ln_rho_val, {"long_name": "Logarithm of Density", "units": "ln(kg/m3)"})
+            "ln_t_icosahedral": (["level", "node"], ln_t_val, {"long_name": "Logarithm of Temperature", "units": "ln(K)"}),
+            "ln_p_icosahedral": (["level", "node"], ln_p_val, {"long_name": "Logarithm of Pressure", "units": "ln(Pa)"}),
+            "ln_rho_icosahedral": (["level", "node"], ln_rho_val, {"long_name": "Logarithm of Density", "units": "ln(kg/m3)"})
         }
 
-        # 5. Passthrough Non-Thermodynamic Variables (u, v, w, q, etc.)
+        # 5. Passthrough Non-Thermodynamic Variables (u, v, w, q, h, etc.)
         skip_keys = {t_key, p_key, rho_key} if rho_key else {t_key, p_key}
         for var_name, (data_arr, orig_attrs) in interpolated_fields.items():
             if var_name not in skip_keys:
@@ -152,11 +161,19 @@ class IcosahedralLogStatePipeline:
                     "coordinates": "longitude latitude",
                     "mesh": "icosahedral_mesh"
                 })
-                data_vars_out[out_name] = (["height", "node"], data_arr, new_attrs)
 
-        # 6. Append Static Mesh Geometry
+                if data_arr.ndim == 2:
+                    data_vars_out[out_name] = (["level", "node"], data_arr, new_attrs)
+                elif data_arr.ndim == 1:
+                    data_vars_out[out_name] = (["node"], data_arr, new_attrs)
+
+        # 6. Append Terrain Metadata (h_terrain, elevation)
+        if 'h_terrain' in interpolated_fields and 'h_terrain' not in data_vars_out:
+            data_vars_out['h_terrain'] = (["node"], interpolated_fields['h_terrain'][0], ds_src['h_terrain'].attrs)
+
+        # 7. Append Static Mesh Geometry
         for static_field in ['land_sea_mask', 'elevation']:
-            if static_field in self.ds_mesh:
+            if static_field in self.ds_mesh and static_field not in data_vars_out:
                 data_vars_out[static_field] = (["node"], self.ds_mesh[static_field].values, self.ds_mesh[static_field].attrs)
 
         data_vars_out.update({
@@ -171,11 +188,17 @@ class IcosahedralLogStatePipeline:
 
         # Coordinates definition
         coords_out = {
-            "height": ds_src.height.values,
+            "level": np.arange(1, len(ds_src[vert_dim]) + 1, dtype=np.int32),
             "node": self.ds_mesh.node.values,
             "face": self.ds_mesh.face.values,
             "three": np.arange(3)
         }
+
+        if "eta" in ds_src.coords:
+            coords_out["eta"] = ("level", ds_src["eta"].values, ds_src["eta"].attrs)
+        if "target_level" in ds_src.coords:
+            coords_out["target_level"] = ("level", ds_src["target_level"].values, ds_src["target_level"].attrs)
+
         for time_coord in ['time', 'step', 'valid_time']:
             if time_coord in ds_src.coords:
                 coords_out[time_coord] = ds_src[time_coord].values
@@ -184,23 +207,23 @@ class IcosahedralLogStatePipeline:
             data_vars=data_vars_out,
             coords=coords_out,
             attrs={
-                "title": "AIDA GNN Log-State Weather Data on Global Icosahedral Grid",
-                "source_dataset": ds_src.attrs.get("title", "Vertical Height Reanalysis File"),
+                "title": "AIDA GNN Log-State Weather Data on Global Icosahedral Grid with Terrain Following",
+                "source_dataset": ds_src.attrs.get("title", "Terrain-Following Reanalysis File"),
+                "terrain_formula": ds_src.attrs.get("terrain_formula", "h = Hmax - eta * (Hmax - Hterrain)"),
                 "conventions": "CF-1.8 UGRID-1.0"
             }
         )
 
-        # Serialize directly
         os.makedirs(os.path.dirname(output_nc) or ".", exist_ok=True)
         ds_output.to_netcdf(output_nc, format="NETCDF4")
 
         ds_src.close()
         ds_output.close()
-        print(f"  -> Successfully saved log-state dataset to: {output_nc}")
+        print(f"  -> Successfully saved terrain-following log-state dataset to: {output_nc}")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="End-to-End Lat-Lon Interpolation and Log-State Transformation Pipeline")
+    parser = argparse.ArgumentParser(description="Terrain-Following Lat-Lon to Icosahedral Log-State Pipeline")
     parser.add_argument("-i", "--input", help="Single input regular lat-lon NetCDF file")
     parser.add_argument("--input_dir", help="Directory containing regular lat-lon NetCDF files")
     parser.add_argument("-m", "--mesh", required=True, help="Path to master icosahedral mesh file")

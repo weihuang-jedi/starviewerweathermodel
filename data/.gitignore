@@ -1,0 +1,5 @@
+log.*
+tmp_*
+*.png
+icosahedral-grid
+terrain-regular-grid

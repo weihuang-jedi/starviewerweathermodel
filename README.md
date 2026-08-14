@@ -41,9 +41,9 @@ git push -u origin develop
 
    4.1 interpolate to terrain following height grid:
        python interpolate_to_terrain_heights.py \
-          --input gfs.t06z.pgrb2.0p25.f000 \
-          --etopo etopo/ETOPO_2022_v1_60s_N90W180_geoid.nc \
-          --output gfs_terrain_heights.nc
+          --etopo /scratch4/NAGAPE/epic/Wei.Huang/src/starviewergraphcast/data/etopo/ETOPO_2022_v1_60s_N90W180_geoid.nc \
+          --input tmp_20240101_gfs.t00z.pgrb2b.1p00.f000 \
+          --output terrain-regular-grid/gfs.20240101.t00z.1p00.f000.nc
 
    python interpolate2icosahedral.py \
       --input gfs.20210101.t00z.1p00.f000.nc \
