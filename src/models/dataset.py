@@ -154,38 +154,46 @@ class LogStateZarrDataset(Dataset):
         return clean_obs
 
     def __getitem__(self, idx):
-        # Background x(t) and Target y(t+1)
-        x_val = np.stack([self.ds[v].isel(time=idx).values for v in self.var_names], axis=0)
-        y_val = np.stack([self.ds[v].isel(time=idx + 1).values for v in self.var_names], axis=0)
+        t_idx = self.valid_indices[idx]
+        idx_minus6, idx_zero, idx_plus6 = t_idx - 1, t_idx, t_idx + 1
 
-        x_val = np.nan_to_num(x_val, nan=0.0, posinf=10.0, neginf=-10.0).astype(np.float32)
-        y_val = np.nan_to_num(y_val, nan=0.0, posinf=10.0, neginf=-10.0).astype(np.float32)
+        # Extract dynamic state variables
+        x_minus6 = np.stack([self.ds[v].isel(time=idx_minus6).values for v in self.var_names], axis=0)
+        x_zero   = np.stack([self.ds[v].isel(time=idx_zero).values for v in self.var_names], axis=0)
+        target   = np.stack([self.ds[v].isel(time=idx_plus6).values for v in self.var_names], axis=0)
 
-        # Extract 3D Terrain-Following Heights [Levels, Nodes]
+        x_trajectory = np.concatenate([x_minus6, x_zero], axis=0)
+
+        # ---------------------------------------------------------------------
+        # ABSOLUTE NUMPY SANITIZATION (Replaces NaNs BEFORE PyTorch Tensor Creation)
+        # ---------------------------------------------------------------------
+        x_trajectory = np.nan_to_num(x_trajectory, nan=0.0, posinf=5.0, neginf=-5.0).astype(np.float32)
+        target       = np.nan_to_num(target,       nan=0.0, posinf=5.0, neginf=-5.0).astype(np.float32)
+
+        # Build node mask (True where data is valid, False where original data was NaN)
+        valid_mask_np = ~np.isnan(self.ds[self.var_names[0]].isel(time=idx_plus6).values)
+        valid_mask_np = np.nan_to_num(valid_mask_np, nan=False).astype(bool)
+
+        # 3D Terrain Heights
         if 'h_icosahedral' in self.ds:
-            h_3d = self.ds['h_icosahedral'].isel(time=idx).values
+            h_3d = self.ds['h_icosahedral'].isel(time=idx_zero).values
         elif 'h' in self.ds:
-            h_3d = self.ds['h'].isel(time=idx).values
+            h_3d = self.ds['h'].isel(time=idx_zero).values
         else:
-            baseline_h = np.array([
-                2, 10, 20, 50, 75, 100, 150, 200, 300, 400,
-                500, 750, 1000, 1250, 1500, 2000, 2500, 3000, 3500, 4000,
-                4500, 5000, 6000, 7000, 8000, 9000, 10000, 11500, 13000, 15000,
-                17500, 20000
-            ], dtype=np.float32)
+            baseline_h = np.linspace(2, 20000, 32, dtype=np.float32)
             h_3d = np.repeat(baseline_h[:, np.newaxis], self.num_nodes, axis=1)
 
         h_3d = np.nan_to_num(h_3d, nan=0.0, posinf=20000.0, neginf=0.0).astype(np.float32)
 
         item = {
-            'background': torch.from_numpy(x_val),                 # [Vars=7, Levels=32, Nodes]
-            'target': torch.from_numpy(y_val),                     # [Vars=7, Levels=32, Nodes]
-            'h_3d': torch.from_numpy(h_3d),                         # [Levels=32, Nodes]
-            'static_topo': torch.from_numpy(self.static_topo_np),   # [Static_Feats=2, Nodes]
+            'input_trajectory': torch.from_numpy(x_trajectory),   # [In_Vars=14, Levels=32, Nodes]
+            'target_state': torch.from_numpy(target),             # [Out_Vars=7, Levels=32, Nodes]
+            'valid_mask': torch.from_numpy(valid_mask_np),        # [Levels=32, Nodes] boolean mask
+            'h_3d': torch.from_numpy(h_3d),                       # [Levels=32, Nodes]
+            'static_topo': torch.from_numpy(self.static_topo_np), # [Static_Feats=2, Nodes]
         }
 
-        # Load observations for time step t+1
-        item.update(self._load_observations_for_time(self.times[idx + 1]))
+        item.update(self._load_observations_for_time(self.times[idx_plus6]))
         return item
 
 

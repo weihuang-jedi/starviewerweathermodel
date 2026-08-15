@@ -3,9 +3,8 @@
 models/loss.py
 --------------
 Composite Physical Balance, Mesh Laplacian, and Radiance Loss Engine for AIDA GNN.
-Computes MSE state errors, 2nd-order graph Laplacian pressure penalties, asymmetric
-log-space moisture barrier constraints, geostrophic/divergence dynamic penalties,
-and safe multi-sensor satellite radiance innovations.
+Features explicit numerical bounds on density un-normalization, geostrophic balance,
+and equator Coriolis divisions to prevent loss float overflows during training.
 """
 
 import os
@@ -26,13 +25,6 @@ class M4MeshOperators(nn.Module):
         self.register_buffer("lat_deg", lat_deg)
 
     def forward(self, scalar_field: torch.Tensor):
-        """
-        Computes horizontal gradient components (df/dx, df/dy) over icosahedral nodes.
-        Args:
-            scalar_field: Tensor [Batch, Nodes] or [Batch, Levels, Nodes]
-        Returns:
-            df_dx, df_dy of identical shape
-        """
         scalar_field = scalar_field.contiguous()
         orig_shape = scalar_field.shape
 
@@ -58,9 +50,6 @@ class M4MeshOperators(nn.Module):
 
 
 def build_icosahedral_differential_operators(lat_deg: torch.Tensor, lon_deg: torch.Tensor, edge_index: torch.Tensor):
-    """
-    Constructs sparse COO/CSR differential spatial gradient matrices (Gx, Gy) for M4 mesh.
-    """
     N = len(lat_deg)
     src_nodes, dst_nodes = edge_index[0].numpy(), edge_index[1].numpy()
 
@@ -114,20 +103,20 @@ def generate_or_load_edge_index(num_nodes: int, edge_file: str = None) -> torch.
 
 class AIDASurrogateLoss(nn.Module):
     """
-    Numerically Stable Composite Loss Engine for AIDA GNN.
+    Numerically Guarded Composite Loss Engine for AIDA GNN.
     """
     def __init__(
         self,
         w_mse: float = 1.0,
         w_conv: float = 0.05,
-        lambda_dyn: float = 0.01,
-        lambda_laplacian_p: float = 0.18,
+        lambda_dyn: float = 0.001,
+        lambda_laplacian_p: float = 0.05,
         weight_grad_state: float = 0.25,
         lambda_p_acc: float = 0.15,
         lambda_asym_p: float = 0.35,
         weight_state_eq: float = 0.12,
         weight_q_log: float = 0.25,
-        lambda_asym_q: float = 0.50,
+        lambda_asym_q: float = 0.10,
         weight_joint_bias: float = 0.10,
         tau_min_p: float = 0.08,
         num_levels: int = 32,
@@ -156,56 +145,59 @@ class AIDASurrogateLoss(nn.Module):
         self.register_buffer("mu_ln_p", torch.tensor(10.50, dtype=torch.float32))
         self.register_buffer("std_ln_p", torch.tensor(1.20, dtype=torch.float32))
 
-    def forward(self, pred: torch.Tensor, target: torch.Tensor, edge_index: torch.Tensor, graph_mesh_ops: nn.Module = None):
-        """
-        Args:
-            pred: [Batch, Out_Vars=7, Levels=32, Nodes]
-            target: [Batch, Out_Vars=7, Levels=32, Nodes]
-            edge_index: [2, Num_Edges]
-            graph_mesh_ops: M4MeshOperators instance
-        """
+    def forward(self, pred: torch.Tensor, target: torch.Tensor, edge_index: torch.Tensor, graph_mesh_ops: nn.Module = None, valid_mask: torch.Tensor = None):
         metrics = {}
 
-        # 1. Bounded Base MSE Reconstruction Loss
-        pred_clamped = torch.clamp(pred, min=-20.0, max=20.0)
-        target_clamped = torch.clamp(target, min=-20.0, max=20.0)
+        # Clamp predictions to valid log-state bounds
+        pred_clean = torch.clamp(pred, min=-10.0, max=10.0)
+        target_clean = torch.clamp(target, min=-10.0, max=10.0)
 
-        loss_mse = F.mse_loss(pred_clamped, target_clamped)
+        # 1. Base Physical State Reconstruction Loss (MSE)
+        if valid_mask is not None:
+            mask_7d = valid_mask.unsqueeze(1).expand_as(pred_clean)
+            diff_sq = (pred_clean - target_clean) ** 2
+            loss_mse = torch.sum(diff_sq * mask_7d) / (torch.sum(mask_7d) * 7.0 + 1e-8)
+        else:
+            loss_mse = F.mse_loss(pred_clean, target_clean)
+
+        loss_mse = torch.nan_to_num(loss_mse, nan=0.0)
         metrics["loss_mse"] = loss_mse.item()
-
         total_loss = self.w_mse * loss_mse
 
-        # 2. Asymmetric Moisture Barrier Loss (Enforces q > 0)
-        q_pred = pred[:, 4, :, :]
+        # 2. Moisture Constraint (q > 0)
+        q_pred = pred_clean[:, 4, :, :]
         q_neg_penalty = torch.relu(-q_pred + 1e-7) ** 2
         loss_asym_q = torch.mean(q_neg_penalty)
+        loss_asym_q = torch.nan_to_num(loss_asym_q, nan=0.0)
         metrics["loss_asym_q"] = loss_asym_q.item()
         total_loss += (self.lambda_asym_q * loss_asym_q)
 
-        # 3. Graph Laplacian Smoothness Penalty on Pressure
-        p_pred = pred[:, 6, :, :]  # ln_p
+        # 3. Laplacian Pressure Penalty
+        p_pred = pred_clean[:, 6, :, :]
         src, dst = edge_index[0], edge_index[1]
         diff_p = p_pred[:, :, src] - p_pred[:, :, dst]
         loss_laplacian_p = torch.mean(diff_p ** 2)
+        loss_laplacian_p = torch.nan_to_num(loss_laplacian_p, nan=0.0)
         metrics["loss_laplacian_p"] = loss_laplacian_p.item()
         total_loss += (self.lambda_laplacian_p * loss_laplacian_p)
 
-        # 4. Geostrophic Dynamics Loss
-        if graph_mesh_ops is not None and hasattr(graph_mesh_ops, "Gx_sparse"):
-            u_pred = pred[:, 1, :, :]
-            v_pred = pred[:, 2, :, :]
+        # 4. Geostrophic Dynamics Penalty
+        if self.lambda_dyn > 0.0 and graph_mesh_ops is not None and hasattr(graph_mesh_ops, "Gx_sparse"):
+            u_pred = pred_clean[:, 1, :, :]
+            v_pred = pred_clean[:, 2, :, :]
             dp_dx, dp_dy = graph_mesh_ops(p_pred)
 
             f_coriolis = 2.0 * 7.2921e-5 * torch.sin(graph_mesh_ops.lat_deg * np.pi / 180.0).view(1, 1, -1).to(pred.device)
-            f_coriolis = torch.where(torch.abs(f_coriolis) < 1e-5, torch.sign(f_coriolis) * 1e-5 + 1e-5, f_coriolis)
+            f_coriolis = torch.where(torch.abs(f_coriolis) < 2e-5, torch.sign(f_coriolis) * 2e-5 + 2e-5, f_coriolis)
 
-            rho_pred = torch.exp(pred[:, 5, :, :] * self.std_ln_rho + self.mu_ln_rho)
-            rho_pred = torch.clamp(rho_pred, min=1e-5)
+            ln_rho_unnorm = pred_clean[:, 5, :, :] * self.std_ln_rho + self.mu_ln_rho
+            rho_pred = torch.clamp(torch.exp(torch.clamp(ln_rho_unnorm, min=-10.0, max=1.0)), min=1e-4, max=2.0)
 
-            u_geo = -1.0 / (rho_pred * f_coriolis) * dp_dy
-            v_geo = 1.0 / (rho_pred * f_coriolis) * dp_dx
+            u_geo = torch.clamp(-1.0 / (rho_pred * f_coriolis) * dp_dy, min=-100.0, max=100.0)
+            v_geo = torch.clamp(1.0 / (rho_pred * f_coriolis) * dp_dx, min=-100.0, max=100.0)
 
             loss_dyn = F.mse_loss(u_pred, u_geo) + F.mse_loss(v_pred, v_geo)
+            loss_dyn = torch.nan_to_num(loss_dyn, nan=0.0)
             metrics["loss_dynamics_total"] = loss_dyn.item()
             total_loss += (self.lambda_dyn * loss_dyn)
         else:

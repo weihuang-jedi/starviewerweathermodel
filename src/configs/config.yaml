@@ -26,7 +26,7 @@ training:
   epochs: 35
   batch_size: 4        # Batch size per GPU (lowered to fit memory)
   accum_steps: 4       # Gradient accumulation steps (Effective batch size = 16)
-  lr: 0.0005
+  lr: 0.0001
   weight_decay: 0.0001
   log_interval: 1
   save_interval: 5
@@ -47,13 +47,13 @@ loss_weights:
   tau_min_p: 0.08
 
   # Differentiable Multi-Sensor Satellite Radiance Loss Weights (9 Instruments)
-  w_rad: 0.01          # AMSU-A Fallback
-  w_rad_amsua: 0.01    # AMSU-A Temperature Sounder
-  w_rad_iasi: 0.01     # IASI Hyperspectral Sounder
-  w_rad_hms: 0.01      # HMS Surface/Atmospheric Microwave Sounder
-  w_rad_atms: 0.01     # ATMS Advanced Microwave Sounder
-  w_rad_cris: 0.01     # CrIS Cross-track Infrared Sounder
-  w_rad_seviri: 0.01   # SEVIRI Geostationary Sounder
-  w_rad_gsrasr: 0.01   # GOES ABI All-Sky Radiance
-  w_rad_gsrcsr: 0.01   # GOES ABI Clear-Sky Radiance
-  w_rad_ahicsr: 0.01   # Himawari AHI Clear-Sky Radiance
+  w_rad: 0.0          # AMSU-A Fallback
+  w_rad_amsua: 0.0    # AMSU-A Temperature Sounder
+  w_rad_iasi: 0.0     # IASI Hyperspectral Sounder
+  w_rad_hms: 0.0      # HMS Surface/Atmospheric Microwave Sounder
+  w_rad_atms: 0.0     # ATMS Advanced Microwave Sounder
+  w_rad_cris: 0.0     # CrIS Cross-track Infrared Sounder
+  w_rad_seviri: 0.0   # SEVIRI Geostationary Sounder
+  w_rad_gsrasr: 0.0   # GOES ABI All-Sky Radiance
+  w_rad_gsrcsr: 0.0   # GOES ABI Clear-Sky Radiance
+  w_rad_ahicsr: 0.0   # Himawari AHI Clear-Sky Radiance

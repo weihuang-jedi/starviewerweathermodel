@@ -107,8 +107,8 @@ def main():
     parser = argparse.ArgumentParser(
         description="High-Speed Multi-Temporal and Multi-Level Icosahedral NetCDF to Compressed Consolidated Zarr Packer."
     )
-    parser.add_argument("-i", "--input", default="icosahedral-grid/icosahedral_logstate_m4.202*.nc",
-                        help="Input shell glob matching NetCDF files (default: icosahedral-grid/icosahedral_logstate_m4.202*.nc)")
+    parser.add_argument("-i", "--input", default="icosahedral-grid/gfs.202*.nc",
+                        help="Input shell glob matching NetCDF files (default: icosahedral-grid/gfs.202*.nc)")
     parser.add_argument("-o", "--output", default="icosahedral_logstate.zarr",
                         help="Output Zarr path target directory (default: icosahedral_logstate.zarr)")
     parser.add_argument("-c", "--chunk_size", type=int, default=32,
