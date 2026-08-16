@@ -24,13 +24,13 @@ fi
 
 set -x
 
-# 1. Train surrogate
+# rollout forecast
 time \
 python scripts/run_aida_forecast.py \
-  -k checkpoints/aida_gnn_surrogate_logstate.pt \
-  -m icosahedral-grid/icosahedral_logstate_m4.20240730.t00z.nc \
-  -z icosahedral-grid/icosahedral_logstate_m4.20240730.t06z.nc \
-  -e data/graph/icosahedral_edge_index_m4.pt \
+  -k checkpoints/aida_gnn_surrogate_logstate_epoch_005.pt \
+  -e ../graph/graph-grid/icosahedral_edge_index_m4.pt \
   -s 4 \
-  -o forecasts/aida_24h_terrain_forecast.20240730.nc
+  -m ../data/icosahedral-truth/gfs.20260101.t00z.1p00.f000.nc \
+  -z ../data/icosahedral-truth/gfs.20260101.t06z.1p00.f000.nc \
+  -o output/aida.20260101.t12z.1p00.f{lead:03d}.nc
 

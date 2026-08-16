@@ -2,9 +2,9 @@
 """
 models/loss.py
 --------------
-Composite Physical Balance, Mesh Laplacian, and Radiance Loss Engine for AIDA GNN.
-Features explicit numerical bounds on density un-normalization, geostrophic balance,
-and equator Coriolis divisions to prevent loss float overflows during training.
+Composite Physical Balance, Mesh Laplacian, and Standardized Loss Engine for AIDA GNN.
+Standardizes target state channels using variable-specific means/stds to ensure balanced
+loss gradients across temperature, pressure, winds, humidity, and density.
 """
 
 import os
@@ -103,22 +103,16 @@ def generate_or_load_edge_index(num_nodes: int, edge_file: str = None) -> torch.
 
 class AIDASurrogateLoss(nn.Module):
     """
-    Numerically Guarded Composite Loss Engine for AIDA GNN.
+    Standardized Feature Reconstruction and Physical Balance Loss Engine.
+    Scales all 7 target variables by channel standard deviations to prevent scale dominance.
     """
     def __init__(
         self,
         w_mse: float = 1.0,
         w_conv: float = 0.05,
-        lambda_dyn: float = 0.001,
-        lambda_laplacian_p: float = 0.05,
-        weight_grad_state: float = 0.25,
-        lambda_p_acc: float = 0.15,
-        lambda_asym_p: float = 0.35,
-        weight_state_eq: float = 0.12,
-        weight_q_log: float = 0.25,
-        lambda_asym_q: float = 0.10,
-        weight_joint_bias: float = 0.10,
-        tau_min_p: float = 0.08,
+        lambda_dyn: float = 0.0001,
+        lambda_laplacian_p: float = 0.01,
+        lambda_asym_q: float = 0.05,
         num_levels: int = 32,
         **kwargs
     ):
@@ -127,17 +121,15 @@ class AIDASurrogateLoss(nn.Module):
         self.w_conv = w_conv
         self.lambda_dyn = lambda_dyn
         self.lambda_laplacian_p = lambda_laplacian_p
-        self.weight_grad_state = weight_grad_state
-        self.lambda_p_acc = lambda_p_acc
-        self.lambda_asym_p = lambda_asym_p
-        self.weight_state_eq = weight_state_eq
-        self.weight_q_log = weight_q_log
         self.lambda_asym_q = lambda_asym_q
-        self.weight_joint_bias = weight_joint_bias
-        self.tau_min_p = tau_min_p
         self.num_levels = num_levels
 
-        # Normalization statistics
+        # Channel Statistics Buffers for [ln_t, u, v, w, q, ln_rho, ln_p]
+        # Prevents large variables (ln_p ~ 10.5) from overwhelming small variables (q ~ 0.005)
+        self.register_buffer("var_means", torch.tensor([5.50, 0.00, 0.00, 0.00, 0.005, -0.20, 10.50], dtype=torch.float32).view(1, 7, 1, 1))
+        self.register_buffer("var_stds",  torch.tensor([0.15, 10.0, 10.0, 0.50, 0.005,  0.80,  1.20], dtype=torch.float32).view(1, 7, 1, 1))
+
+        # Individual Statistics Buffers for physical conversions
         self.register_buffer("mu_ln_t", torch.tensor(5.50, dtype=torch.float32))
         self.register_buffer("std_ln_t", torch.tensor(0.15, dtype=torch.float32))
         self.register_buffer("mu_ln_rho", torch.tensor(-0.20, dtype=torch.float32))
@@ -145,26 +137,37 @@ class AIDASurrogateLoss(nn.Module):
         self.register_buffer("mu_ln_p", torch.tensor(10.50, dtype=torch.float32))
         self.register_buffer("std_ln_p", torch.tensor(1.20, dtype=torch.float32))
 
-    def forward(self, pred: torch.Tensor, target: torch.Tensor, edge_index: torch.Tensor, graph_mesh_ops: nn.Module = None, valid_mask: torch.Tensor = None):
+    def forward(
+        self,
+        pred: torch.Tensor,
+        target: torch.Tensor,
+        edge_index: torch.Tensor,
+        graph_mesh_ops: nn.Module = None,
+        valid_mask: torch.Tensor = None
+    ):
         metrics = {}
 
-        # Clamp predictions to valid log-state bounds
+        # Bound inputs
         pred_clean = torch.clamp(pred, min=-10.0, max=10.0)
         target_clean = torch.clamp(target, min=-10.0, max=10.0)
 
-        # 1. Base Physical State Reconstruction Loss (MSE)
+        # Standardize state variables prior to MSE evaluation
+        pred_norm = (pred_clean - self.var_means) / self.var_stds
+        target_norm = (target_clean - self.var_means) / self.var_stds
+
+        # 1. Base Feature-Standardized State Reconstruction Loss (MSE)
         if valid_mask is not None:
-            mask_7d = valid_mask.unsqueeze(1).expand_as(pred_clean)
-            diff_sq = (pred_clean - target_clean) ** 2
+            mask_7d = valid_mask.unsqueeze(1).expand_as(pred_norm)
+            diff_sq = (pred_norm - target_norm) ** 2
             loss_mse = torch.sum(diff_sq * mask_7d) / (torch.sum(mask_7d) * 7.0 + 1e-8)
         else:
-            loss_mse = F.mse_loss(pred_clean, target_clean)
+            loss_mse = F.mse_loss(pred_norm, target_norm)
 
         loss_mse = torch.nan_to_num(loss_mse, nan=0.0)
         metrics["loss_mse"] = loss_mse.item()
         total_loss = self.w_mse * loss_mse
 
-        # 2. Moisture Constraint (q > 0)
+        # 2. Asymmetric Moisture Penalty (q > 0)
         q_pred = pred_clean[:, 4, :, :]
         q_neg_penalty = torch.relu(-q_pred + 1e-7) ** 2
         loss_asym_q = torch.mean(q_neg_penalty)
@@ -172,7 +175,7 @@ class AIDASurrogateLoss(nn.Module):
         metrics["loss_asym_q"] = loss_asym_q.item()
         total_loss += (self.lambda_asym_q * loss_asym_q)
 
-        # 3. Laplacian Pressure Penalty
+        # 3. Graph Laplacian Smoothness Penalty on Pressure
         p_pred = pred_clean[:, 6, :, :]
         src, dst = edge_index[0], edge_index[1]
         diff_p = p_pred[:, :, src] - p_pred[:, :, dst]

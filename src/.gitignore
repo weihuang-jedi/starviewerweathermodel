@@ -1,2 +1,5 @@
 log.*
+*.csv
+*.png
 output
+checkpoints

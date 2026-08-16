@@ -5,11 +5,15 @@ scripts/run_aida_forecast.py
 Autoregressive Forecast Rollout Engine using the trained 4D Terrain-Following AIDA Checkpoint.
 Infers X_+6h, X_+12h, X_+18h... from initial analysis state pair (X_-6h, X_0)
 while conditioning on static topography (static_topo) and 3D terrain heights (h_3d).
+
+Exports individual per-lead-time NetCDF files (e.g., aida.20260101.t12z.f000.nc,
+aida.20260101.t12z.f006.nc, ...) containing full mesh geometry ready for plotting.
 """
 
 import argparse
 import os
 import sys
+import re
 import yaml
 import numpy as np
 import xarray as xr
@@ -23,7 +27,7 @@ from models.graph import generate_or_load_edge_index
 
 
 def load_state_from_file(file_path: str, var_names: list):
-    """Helper to extract dynamic 7-variable log-state tensor and static terrain features."""
+    """Helper to extract dynamic 7-variable log-state tensor, 3D terrain heights, and static topography."""
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"[ERROR] Input state file not found: '{file_path}'")
 
@@ -84,8 +88,81 @@ def load_state_from_file(file_path: str, var_names: list):
 
     static_topo_np = np.stack([h_terrain.astype(np.float32) / 10000.0, ls_mask.astype(np.float32)], axis=0)
 
-    ds.close()
     return state_np, h_3d_np.astype(np.float32), static_topo_np, ds
+
+
+def parse_date_tag(filename: str) -> str:
+    """Extracts date tag string (e.g., '20260101.t12z') from a file path."""
+    match = re.search(r'(\d{8}\.t\d{2}z)', os.path.basename(filename))
+    if match:
+        return match.group(1)
+    return "forecast"
+
+
+def export_lead_time_netcdf(
+    output_path: str,
+    state_arr: np.ndarray,
+    h_3d_np: np.ndarray,
+    static_topo_np: np.ndarray,
+    ds_ref: xr.Dataset,
+    var_names: list,
+    lead_time_hours: int,
+    num_levels: int,
+    num_nodes: int
+):
+    """Saves a single lead-time forecast state as a fully self-contained CF/UGRID NetCDF file."""
+    data_vars_out = {}
+
+    # Dynamic 7 variables -> [level, node]
+    for idx, var in enumerate(var_names):
+        out_var_name = var if var.endswith("_icosahedral") else f"{var}_icosahedral"
+        data_vars_out[out_var_name] = (
+            ["level", "node"],
+            state_arr[idx, :, :],
+            {"long_name": f"Forecasted {var}", "mesh": "icosahedral_mesh"}
+        )
+
+    # Attach 3D Terrain Heights and Surface Topography
+    data_vars_out["h_icosahedral"] = (
+        ["level", "node"],
+        h_3d_np,
+        {"units": "meters", "long_name": "3D Terrain-Following Geometric Height Above Sea Level", "mesh": "icosahedral_mesh"}
+    )
+    data_vars_out["h_terrain_icosahedral"] = (
+        ["node"],
+        static_topo_np[0] * 10000.0,
+        {"units": "meters", "long_name": "Surface Topography Elevation", "mesh": "icosahedral_mesh"}
+    )
+
+    # Passthrough Mesh Coordinates and Connectivity for Plotting Compatibility
+    for static_var in ["longitude", "latitude", "face_nodes", "x_cartesian", "y_cartesian", "z_cartesian", "land_sea_mask", "elevation"]:
+        if static_var in ds_ref:
+            data_vars_out[static_var] = ds_ref[static_var]
+
+    coords_out = {
+        "level": np.arange(1, num_levels + 1, dtype=np.int32),
+        "node": np.arange(num_nodes, dtype=np.int32)
+    }
+
+    if "face" in ds_ref.dims:
+        coords_out["face"] = ds_ref["face"].values
+    if "three" in ds_ref.dims:
+        coords_out["three"] = ds_ref["three"].values
+
+    ds_out = xr.Dataset(
+        data_vars=data_vars_out,
+        coords=coords_out,
+        attrs={
+            "title": "AIDA GNN 4D Observation-Guided Terrain Weather Forecast",
+            "conventions": "CF-1.8 UGRID-1.0",
+            "forecast_lead_time_hours": lead_time_hours
+        }
+    )
+
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    ds_out.to_netcdf(output_path, format="NETCDF4")
+    ds_out.close()
+    print(f"  ├─ Saved lead time f{lead_time_hours:03d}h -> '{output_path}'", flush=True)
 
 
 def run_autoregressive_forecast(
@@ -94,7 +171,7 @@ def run_autoregressive_forecast(
     x_zero_file: str,
     edge_index_path: str,
     forecast_steps: int = 4,  # 4 steps x 6h = 24h forecast
-    output_nc: str = "aida_24h_terrain_forecast.nc"
+    output_pattern: str = "output/aida.{date_tag}.f{lead:03d}.nc"
 ):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[FORECAST] Operating on compute device: {device}", flush=True)
@@ -136,6 +213,7 @@ def run_autoregressive_forecast(
     print(f"[FORECAST] Reading initial state X_0  : '{x_zero_file}'", flush=True)
     x_0_np, h_3d_np, static_topo_np, ds_ref = load_state_from_file(x_zero_file, var_names)
 
+    date_tag = parse_date_tag(x_zero_file)
     num_nodes = x_0_np.shape[2]
     edge_index = generate_or_load_edge_index(num_nodes=num_nodes, edge_file=edge_index_path).to(device)
 
@@ -143,82 +221,58 @@ def run_autoregressive_forecast(
     state_prev = torch.from_numpy(x_m6_np).unsqueeze(0).to(device)
     state_curr = torch.from_numpy(x_0_np).unsqueeze(0).to(device)
     static_topo = torch.from_numpy(static_topo_np).unsqueeze(0).to(device)
-    h_3d = torch.from_numpy(h_3d_np).unsqueeze(0).to(device)
-
-    forecast_history = [state_curr.cpu().numpy().squeeze(0)]  # Initial state t0
 
     print(f"\n" + "=" * 80)
     print(f" STARTING {forecast_steps * 6}-HOUR TERRAIN-FOLLOWING FORECAST ROLLOUT")
+    print(f" Base Time Tag: {date_tag}")
     print("=" * 80, flush=True)
+
+    # Save f000 (Initial Analysis State t0)
+    f000_path = output_pattern.format(date_tag=date_tag, lead=0)
+    export_lead_time_netcdf(
+        output_path=f000_path,
+        state_arr=x_0_np,
+        h_3d_np=h_3d_np,
+        static_topo_np=static_topo_np,
+        ds_ref=ds_ref,
+        var_names=var_names,
+        lead_time_hours=0,
+        num_levels=num_levels,
+        num_nodes=num_nodes
+    )
 
     with torch.no_grad():
         for step in range(1, forecast_steps + 1):
+            lead_hours = step * 6
+
             # Concatenate (X_prev, X_curr) along variable dimension -> [1, 14, 32, 2562]
             input_traj = torch.cat([state_prev, state_curr], dim=1)
 
             # GNN Forward Step conditioning on static topography
             state_next = model(input_traj, edge_index, static_topo=static_topo)
 
-            print(f"  └─ Completed Autoregressive Step +{step * 6:02d}h forecast", flush=True)
+            next_np = state_next.cpu().numpy().squeeze(0)
 
-            forecast_history.append(state_next.cpu().numpy().squeeze(0))
+            # Export per-lead-time NetCDF
+            step_path = output_pattern.format(date_tag=date_tag, lead=lead_hours)
+            export_lead_time_netcdf(
+                output_path=step_path,
+                state_arr=next_np,
+                h_3d_np=h_3d_np,
+                static_topo_np=static_topo_np,
+                ds_ref=ds_ref,
+                var_names=var_names,
+                lead_time_hours=lead_hours,
+                num_levels=num_levels,
+                num_nodes=num_nodes
+            )
 
             # Shift state windows for next step
             state_prev = state_curr
             state_curr = state_next
 
-    # 3. Export Multi-Step Forecast Trajectory to NetCDF4
-    print(f"\n[PACKAGE] Structuring output NetCDF file: '{output_nc}'...", flush=True)
-    forecast_arr = np.stack(forecast_history, axis=0)  # [Time_Steps+1, Vars=7, Levels=32, Nodes=2562]
-
-    lead_times = np.arange(0, (forecast_steps + 1) * 6, 6, dtype=np.int32)
-
-    data_vars_out = {}
-    for idx, var in enumerate(var_names):
-        data_vars_out[var] = (
-            ["lead_time", "level", "node"],
-            forecast_arr[:, idx, :, :],
-            {"long_name": f"Forecasted {var}", "mesh": "icosahedral_mesh"}
-        )
-
-    # Attach terrain metadata
-    data_vars_out["h_icosahedral"] = (
-        ["level", "node"],
-        h_3d_np,
-        {"units": "meters", "long_name": "3D Terrain-Following Geometric Height Above Sea Level"}
-    )
-    data_vars_out["h_terrain_icosahedral"] = (
-        ["node"],
-        static_topo_np[0] * 10000.0,
-        {"units": "meters", "long_name": "Surface Topography Elevation"}
-    )
-
-    coords_out = {
-        "lead_time": ("lead_time", lead_times, {"units": "hours", "long_name": "Forecast Lead Time"}),
-        "level": np.arange(1, num_levels + 1, dtype=np.int32),
-        "node": np.arange(num_nodes, dtype=np.int32)
-    }
-
-    if "longitude" in ds_ref and "latitude" in ds_ref:
-        data_vars_out["longitude"] = (["node"], ds_ref["longitude"].values)
-        data_vars_out["latitude"] = (["node"], ds_ref["latitude"].values)
-
-    ds_out = xr.Dataset(
-        data_vars=data_vars_out,
-        coords=coords_out,
-        attrs={
-            "title": "AIDA GNN 4D Observation-Guided Terrain Weather Forecast",
-            "conventions": "CF-1.8 UGRID-1.0",
-            "forecast_steps": forecast_steps
-        }
-    )
-
-    os.makedirs(os.path.dirname(output_nc) or ".", exist_ok=True)
-    ds_out.to_netcdf(output_nc, format="NETCDF4")
     ds_ref.close()
-    ds_out.close()
-
-    print(f"[SUCCESS] Multi-step forecast rollout complete! Saved to '{output_nc}'.\n", flush=True)
+    print(f"\n[SUCCESS] Multi-step forecast rollout complete! Exported {forecast_steps + 1} NetCDF files.\n", flush=True)
 
 
 def main():
@@ -228,7 +282,7 @@ def main():
     parser.add_argument("-z", "--zero", required=True, help="Path to X_0 current initial analysis state file")
     parser.add_argument("-e", "--edges", default="data/graph/icosahedral_edge_index_m4.pt", help="Path to graph edge index")
     parser.add_argument("-s", "--steps", type=int, default=4, help="Number of 6h forecast steps (default: 4 = 24h)")
-    parser.add_argument("-o", "--output", default="aida_24h_terrain_forecast.nc", help="Destination NetCDF output path")
+    parser.add_argument("-o", "--output_pattern", default="output/aida.{date_tag}.f{lead:03d}.nc", help="Output path pattern with {date_tag} and {lead:03d}")
 
     args = parser.parse_args()
 
@@ -238,7 +292,7 @@ def main():
         x_zero_file=args.zero,
         edge_index_path=args.edges,
         forecast_steps=args.steps,
-        output_nc=args.output
+        output_pattern=args.output_pattern
     )
 
 

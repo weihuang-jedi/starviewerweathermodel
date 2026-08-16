@@ -15,8 +15,8 @@ mesh:
   samples: 100
 
 model:
-  hidden_dim: 128
-  num_layers: 4
+  hidden_dim: 256              # Increase hidden capacity from 128 -> 256
+  num_layers: 6                # Increase message-passing depth from 4 -> 6
   # Terrain-Following 4D Trajectory Architecture Parameters
   in_vars: 14          # Dynamic input channels (7 vars x 2 timesteps: X_-6h, X_0)
   out_vars: 7          # Output channels predicted (ln_t, u, v, w, q, ln_rho, ln_p for X_+6h)
@@ -26,16 +26,17 @@ training:
   epochs: 35
   batch_size: 4        # Batch size per GPU (lowered to fit memory)
   accum_steps: 4       # Gradient accumulation steps (Effective batch size = 16)
-  lr: 0.0001
+  lr: 0.0003                   # Base Learning Rate
+  warmup_epochs: 3             # 3-Epoch linear learning rate warmup
   weight_decay: 0.0001
   log_interval: 1
-  save_interval: 5
+  save_interval: 1
 
 loss_weights:
   # Base Reconstruction & Physical Regularization
   w_mse: 1.0
-  w_conv: 0.05
-  lambda_dyn: 0.01
+  w_conv: 0.10
+  lambda_dyn: 0.0001           # Soft dynamics constraint to prevent early gradient explosion
   lambda_laplacian_p: 0.18
   weight_grad_state: 0.25
   lambda_p_acc: 0.15
