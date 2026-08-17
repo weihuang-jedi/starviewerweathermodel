@@ -417,7 +417,7 @@ def train_model(cfg: dict):
         start_epoch = ckpt_data.get('epoch', 0) + 1
         print(f"[TRAIN] Successfully loaded state! Resuming from Epoch {start_epoch:03d}...", flush=True)
 
-    for epoch in range(1, epochs + 1):
+    for epoch in range(start_epoch, epochs + 1):
         epoch_losses = train_epoch(
             epoch=epoch,
             total_epochs=epochs,
