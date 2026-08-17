@@ -22,13 +22,16 @@ if [ -f checkpoints/aida_gnn_surrogate_logstate.pt ]; then
    mv checkpoints/aida_gnn_surrogate_logstate.pt checkpoints/aida_gnn_surrogate_logstate_${n}.pt
 fi
 
+#gnn_chpt=checkpoints/aida_gnn_surrogate_logstate_epoch_001.pt
+gnn_chpt=checkpoints/aida_gnn_surrogate_logstate_epoch_005.pt
+
 set -x
 
 # rollout forecast
 time \
 python scripts/run_aida_forecast.py \
-  -k checkpoints/aida_gnn_surrogate_logstate_epoch_005.pt \
   -e ../graph/graph-grid/icosahedral_edge_index_m4.pt \
+  -k ${gnn_chpt} \
   -s 4 \
   -m ../data/icosahedral-truth/gfs.20260101.t00z.1p00.f000.nc \
   -z ../data/icosahedral-truth/gfs.20260101.t06z.1p00.f000.nc \

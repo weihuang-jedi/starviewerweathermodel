@@ -23,7 +23,7 @@ model:
   num_static_feats: 2  # Static node features (Surface Elevation + Land-Sea Mask)
 
 training:
-  epochs: 35
+  epochs: 20
   batch_size: 4        # Batch size per GPU (lowered to fit memory)
   accum_steps: 4       # Gradient accumulation steps (Effective batch size = 16)
   lr: 0.0003                   # Base Learning Rate
@@ -31,19 +31,21 @@ training:
   weight_decay: 0.0001
   log_interval: 1
   save_interval: 1
+  log_batch_freq: 50
+  resume_checkpoint: "checkpoints/aida_gnn_surrogate_logstate_epoch_005.pt"
 
 loss_weights:
   # Base Reconstruction & Physical Regularization
   w_mse: 1.0
-  w_conv: 0.10
+  w_conv: 0.05
   lambda_dyn: 0.0001           # Soft dynamics constraint to prevent early gradient explosion
-  lambda_laplacian_p: 0.18
   weight_grad_state: 0.25
   lambda_p_acc: 0.15
   lambda_asym_p: 0.35
+  lambda_asym_q: 0.05
+  lambda_laplacian_p: 0.01
   weight_state_eq: 0.12
   weight_q_log: 0.25
-  lambda_asym_q: 0.50
   weight_joint_bias: 0.10
   tau_min_p: 0.08
 

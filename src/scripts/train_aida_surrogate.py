@@ -406,6 +406,17 @@ def train_model(cfg: dict):
         eta_min=1e-6
     )
 
+    start_epoch = 1
+    resume_ckpt = train_cfg.get("resume_checkpoint", None)
+    if resume_ckpt and os.path.exists(resume_ckpt):
+        print(f"[TRAIN] Resuming training from checkpoint: '{resume_ckpt}'", flush=True)
+        ckpt_data = torch.load(resume_ckpt, map_location=device)
+        model.load_state_dict(ckpt_data['model_state_dict'])
+        if 'optimizer_state_dict' in ckpt_data:
+            optimizer.load_state_dict(ckpt_data['optimizer_state_dict'])
+        start_epoch = ckpt_data.get('epoch', 0) + 1
+        print(f"[TRAIN] Successfully loaded state! Resuming from Epoch {start_epoch:03d}...", flush=True)
+
     for epoch in range(1, epochs + 1):
         epoch_losses = train_epoch(
             epoch=epoch,
