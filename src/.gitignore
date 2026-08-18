@@ -3,3 +3,4 @@ log.*
 *.png
 output
 checkpoints
+saved_checkpoints

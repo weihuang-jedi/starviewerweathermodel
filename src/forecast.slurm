@@ -24,7 +24,9 @@ fi
 
 #gnn_chpt=checkpoints/aida_gnn_surrogate_logstate_epoch_001.pt
 #gnn_chpt=checkpoints/aida_gnn_surrogate_logstate_epoch_005.pt
-gnn_chpt=checkpoints/aida_gnn_surrogate_logstate_epoch_012.pt
+#gnn_chpt=checkpoints/aida_gnn_surrogate_logstate_epoch_015.pt
+#gnn_chpt=checkpoints/aida_gnn_conv_only_epoch_020.pt
+gnn_chpt=checkpoints/aida_gnn_conv_only_epoch_030.pt
 
 set -x
 

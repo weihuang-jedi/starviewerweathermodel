@@ -7,7 +7,7 @@ paths:
   zarr_path: "../data/icosahedral_logstate.zarr"
   obs_dir: "../data/all_NNJA_data_2024"
   edges_path: "../graph/graph-grid/icosahedral_edge_index_m4.pt"
-  checkpoint_path: "checkpoints/aida_gnn_surrogate_logstate.pt"
+  checkpoint_path: "checkpoints/aida_gnn_conv_only.pt"
 
 mesh:
   num_nodes: 2562
@@ -23,7 +23,7 @@ model:
   num_static_feats: 2  # Static node features (Surface Elevation + Land-Sea Mask)
 
 training:
-  epochs: 20
+  epochs: 40
   batch_size: 4        # Batch size per GPU (lowered to fit memory)
   accum_steps: 4       # Gradient accumulation steps (Effective batch size = 16)
   lr: 0.0003                   # Base Learning Rate
@@ -32,7 +32,7 @@ training:
   log_interval: 1
   save_interval: 1
   log_batch_freq: 50
-  resume_checkpoint: "checkpoints/aida_gnn_surrogate_logstate_epoch_005.pt"
+  resume_checkpoint: "checkpoints/aida_gnn_conv_amsua_iasi.pt"
 
 loss_weights:
   # Base Reconstruction & Physical Regularization
@@ -51,9 +51,9 @@ loss_weights:
 
   # Differentiable Multi-Sensor Satellite Radiance Loss Weights (9 Instruments)
   w_rad: 0.0          # AMSU-A Fallback
-  w_rad_amsua: 0.0    # AMSU-A Temperature Sounder
-  w_rad_iasi: 0.0     # IASI Hyperspectral Sounder
-  w_rad_hms: 0.0      # HMS Surface/Atmospheric Microwave Sounder
+  w_rad_amsua: 0.05    # AMSU-A Temperature Sounder
+  w_rad_iasi: 0.05     # IASI Hyperspectral Sounder
+  w_rad_hms: 0.05      # HMS Surface/Atmospheric Microwave Sounder
   w_rad_atms: 0.0     # ATMS Advanced Microwave Sounder
   w_rad_cris: 0.0     # CrIS Cross-track Infrared Sounder
   w_rad_seviri: 0.0   # SEVIRI Geostationary Sounder
