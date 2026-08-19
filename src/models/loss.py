@@ -120,8 +120,12 @@ class AIDASurrogateLoss(nn.Module):
         self.num_levels = num_levels
 
         # Channel normalization statistics for [ln_t, u, v, w, q, ln_rho, ln_p]
+        # For M4
+        # self.register_buffer("var_means", torch.tensor([5.50, 0.00, 0.00, 0.00, 0.005, -0.20, 10.50], dtype=torch.float32).view(1, 7, 1, 1))
+        # self.register_buffer("var_stds",  torch.tensor([0.15, 10.0, 10.0, 0.50, 0.005,  0.80,  1.20], dtype=torch.float32).view(1, 7, 1, 1))
+        # For M6
         self.register_buffer("var_means", torch.tensor([5.50, 0.00, 0.00, 0.00, 0.005, -0.20, 10.50], dtype=torch.float32).view(1, 7, 1, 1))
-        self.register_buffer("var_stds",  torch.tensor([0.15, 10.0, 10.0, 0.50, 0.005,  0.80,  1.20], dtype=torch.float32).view(1, 7, 1, 1))
+        self.register_buffer("var_stds",  torch.tensor([0.15, 12.5, 12.5, 0.80, 0.005,  0.80,  1.20], dtype=torch.float32).view(1, 7, 1, 1))
 
         self.register_buffer("mu_ln_t", torch.tensor(5.50, dtype=torch.float32))
         self.register_buffer("std_ln_t", torch.tensor(0.15, dtype=torch.float32))

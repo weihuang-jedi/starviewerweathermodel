@@ -125,8 +125,12 @@ def plot_leadtime_series(
     title_str, unit_str = var_titles.get(var_name.upper(), (var_name, ''))
 
     # Regular 2D Interpolation Grid (1.0 degree)
-    reg_lon = np.linspace(-180, 180, 360)
-    reg_lat = np.linspace(-90, 90, 180)
+    #for M4
+    # reg_lon = np.linspace(-180, 180, 360)
+    # reg_lat = np.linspace(-90, 90, 180)
+    #for M6
+    reg_lon = np.linspace(-180, 180, 1440)
+    reg_lat = np.linspace(-90, 90, 720)
     grid_lon, grid_lat = np.meshgrid(reg_lon, reg_lat)
 
     fcst_grids, truth_grids, err_grids = [], [], []

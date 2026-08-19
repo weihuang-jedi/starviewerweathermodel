@@ -6,11 +6,12 @@
 paths:
   zarr_path: "../data/icosahedral_logstate.zarr"
   obs_dir: "../data/all_NNJA_data_2024"
-  edges_path: "../graph/graph-grid/icosahedral_edge_index_m4.pt"
+  edges_path: "../graph/graph-grid/icosahedral_edge_index_m6.pt"
   checkpoint_path: "checkpoints/aida_gnn_conv_only.pt"
 
 mesh:
-  num_nodes: 2562
+  name: "icosahedral_m6"
+  num_nodes: 40962
   num_levels: 32
   samples: 100
 
@@ -24,8 +25,8 @@ model:
 
 training:
   epochs: 40
-  batch_size: 4        # Batch size per GPU (lowered to fit memory)
-  accum_steps: 4       # Gradient accumulation steps (Effective batch size = 16)
+  batch_size: 1        # Batch size per GPU (lowered to fit memory)
+  accum_steps: 8       # Gradient accumulation steps (Effective batch size = 16)
   lr: 0.0003                   # Base Learning Rate
   warmup_epochs: 3             # 3-Epoch linear learning rate warmup
   weight_decay: 0.0001
