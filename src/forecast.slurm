@@ -7,12 +7,12 @@
 #SBATCH --partition=u1-h100
 #SBATCH --qos=gpuwf
 #SBATCH --time=00:45:00
-#SBATCH --output=log.training_%J.out
+#SBATCH --output=log.forecast_%J.out
 #SBATCH --export=NONE
 
-cd /scratch3/NAGAPE/epic/Wei.Huang/src/starviewerdataassimilation/aida
-# cd /scratch4/NAGAPE/epic/Wei.Huang/src/starviewerdataassimilation/aida
-source /scratch4/NAGAPE/epic/Wei.Huang/src/starviewerdataassimilation/svg.env
+SVGHOME=/scratch4/NAGAPE/epic/Wei.Huang/src/starviewerweathermodel
+source ${SVGHOME}/svg.env
+cd ${SVGHOME}/src
 
 if [ -f checkpoints/aida_gnn_surrogate_logstate.pt ]; then
    n=0
@@ -22,15 +22,21 @@ if [ -f checkpoints/aida_gnn_surrogate_logstate.pt ]; then
    mv checkpoints/aida_gnn_surrogate_logstate.pt checkpoints/aida_gnn_surrogate_logstate_${n}.pt
 fi
 
+#gnn_chpt=checkpoints/aida_gnn_surrogate_logstate_epoch_001.pt
+#gnn_chpt=checkpoints/aida_gnn_surrogate_logstate_epoch_005.pt
+#gnn_chpt=checkpoints/aida_gnn_surrogate_logstate_epoch_015.pt
+#gnn_chpt=checkpoints/aida_gnn_conv_only_epoch_020.pt
+gnn_chpt=checkpoints/aida_gnn_conv_only_epoch_030.pt
+
 set -x
 
-# 1. Train surrogate
+# rollout forecast
 time \
-python -u scripts/evaluate_aida_rollout.py \
-  --zarr ../data/icosahedral_2023_logstate.zarr \
-  --edges ../data/graph/icosahedral_edge_index_m4.pt \
-  --checkpoint checkpoints/aida_gnn_surrogate_logstate_12.pt \
-  --rollout-steps 28 \
-  --num-samples 5 \
-  --output-plot output/aida_ar_rollout_7day.png
+python scripts/run_aida_forecast.py \
+  -e ../graph/graph-grid/icosahedral_edge_index_m4.pt \
+  -k ${gnn_chpt} \
+  -s 4 \
+  -m ../data/icosahedral-truth/gfs.20260101.t00z.1p00.f000.nc \
+  -z ../data/icosahedral-truth/gfs.20260101.t06z.1p00.f000.nc \
+  -o output/aida.20260101.t12z.1p00.f{lead:03d}.nc
 

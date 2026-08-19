@@ -1,0 +1,20 @@
+Again, thank you gemini for helping developed this AIDA model.
+
+We know what AIDA model doing is that we have background file (previous 6 hour forecast) Xb,
+and observations both at t0, the AIDA is to start Xb, by some progress, or AI training,
+so we get Xa, which is the new Analysis at t0, which fit better to observations.
+
+Now, we what to move forward a step to change this model to a forecast model.
+Let us start with X-6 (Analysis at previous 6 hours), X0 (current Analysis).
+From historical data, we have O+6 (observation at future 6 hours),
+through AI process using X-6, X0, and O+6 to get X+6, where X+6 fit O+6 better.
+
+After training, we get a checkpoints file .chpt, using this file, and X-6, X0, we get X+6,
+then apply X0, X+6, we get X+12, and so on to get a forecast model.
+
+The difference of this model, is that traditional AI weather models use X to train models,
+and then use X to do forecast. Our model use not only X, but also Obs to train the model,
+and then use X to do forecast.
+
+Could you please help me, Gemini? By changing our background data .zarr file
+to a analysis background data .zarr file?

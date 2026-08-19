@@ -7,19 +7,15 @@ startyear=2024
 res=1p00
 forecasthour=f000
 
-if [ "${forecasthour}" == "f000" ]; then
-   regular_dir=regular_truth
-   icosahedral_dir=icosahedral_truth
-else
-   regular_dir=regular_grid
-   icosahedral_dir=icosahedral_grid
-fi
+regular_dir=terrain-regular-grid
+icosahedral_dir=icosahedral-grid
+datadir=/scratch4/NAGAPE/epic/Wei.Huang/src/starviewergraphcast/data
 
 dayinmonth=(31 28 31 30 31 30 31 31 30 31 30 31)
 
 keepgoing=true
 
-flszlist=(4225193 4228002 4230068 4233136)
+flszlist=(4225193 5579943)
 
 n=0
 while [[ "${n}" -lt "${totalyears}" && "${keepgoing}" == "true" ]]
@@ -59,7 +55,7 @@ do
          do
 	    iflnm=gfs.t${HH}z.pgrb2b.${res}.${forecasthour}
 	    ncflnm=${regular_dir}/gfs.${YYYY}${MM}${DD}.t${HH}z.${res}.${forecasthour}.nc
-	    mlgridflnm=${icosahedral_dir}/global_icosahedral_m4.${YYYY}${MM}${DD}.t${HH}z.${res}.${forecasthour}.nc
+	    mlgridflnm=${icosahedral_dir}/icosahedral_logstate_m4.${YYYY}${MM}${DD}.t${HH}z.${res}.${forecasthour}.nc
 
             if [ ! -f ${mlgridflnm} ]
             then
@@ -68,9 +64,9 @@ do
 	       if [ ! -f ${ncflnm} ]
 	       then
                   echo "aws s3 cp --no-sign-request ${s3dir}/${fdir}/${HH}/atmos/${iflnm} ${tflnm}"
-	          echo "python interpolate_to_heights.py -i ${tflnm} -o ${ncflnm}"
+	          echo "python interpolate_to_terrain_heights.py --etopo ${datadir}/etopo/ETOPO_2022_v1_60s_N90W180_geoid.nc --input ${tflnm} --output ${ncflnm}"
 	       fi
-	       echo "python interpolate2icosahedral.py --input ${ncflnm} --mesh graph/global_icosahedral_mesh_m4.nc --output ${mlgridflnm}"
+	       echo "python interpolate_to_logstate_icosahedral.py -i ${ncflnm} -m ../graph/graph-grid/global_icosahedral_mesh_m4.nc -o ${mlgridflnm}"
 	       break
             else
 	       fs=$(stat -c %s ${mlgridflnm})
@@ -80,8 +76,8 @@ do
 		  echo "File ${mlgridflnm} is ${fs} did not match known file size ${flszlist[0]}, ${flszlist[1]} and ${flszlist[2]}"
 	          tflnm=tmp_${YYYY}${MM}${DD}_gfs.t${HH}z.pgrb2b.${res}.${forecasthour}
                   echo "aws s3 cp --no-sign-request ${s3dir}/${fdir}/${HH}/atmos/${iflnm} ${tflnm}"
-	          echo "python interpolate_to_heights.py -i ${tflnm} -o ${ncflnm}"
-	          echo "python interpolate2icosahedral.py --input ${ncflnm} --mesh graph/global_icosahedral_mesh_m4.nc --output ${mlgridflnm}"
+	          echo "python interpolate_to_terrain_heights.py --etopo ${datadir}/etopo/ETOPO_2022_v1_60s_N90W180_geoid.nc --input ${tflnm} --output ${ncflnm}"
+	          echo "python interpolate_to_logstate_icosahedral.py -i ${ncflnm} -m ../graph/graph-grid/global_icosahedral_mesh_m4.nc -o ${mlgridflnm}"
 	          break
                fi
             fi

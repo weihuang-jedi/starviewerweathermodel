@@ -1,0 +1,25 @@
+(anemoi) [Wei.Huang@ufe02 src]$  python -c "
+import xarray as xr, numpy as np
+ds = xr.open_zarr('../data/icosahedral_logstate.zarr')
+for v in ds.data_vars:
+    n_nan = np.isnan(ds[v].values).sum()
+    print(f'{v:25s}: {n_nan} NaNs')
+"
+elevation                : 0 NaNs
+face_nodes               : 0 NaNs
+h_icosahedral            : 239721216 NaNs
+h_terrain                : 0 NaNs
+h_terrain_icosahedral    : 0 NaNs
+icosahedral_mesh         : 0 NaNs
+land_sea_mask            : 0 NaNs
+ln_p_icosahedral         : 0 NaNs
+ln_rho_icosahedral       : 195121920 NaNs
+ln_t_icosahedral         : 239721216 NaNs
+q_icosahedral            : 0 NaNs
+u_icosahedral            : 239721216 NaNs
+v_icosahedral            : 0 NaNs
+w_icosahedral            : 17840639 NaNs
+x_cartesian              : 0 NaNs
+y_cartesian              : 7491288 NaNs
+z_cartesian              : 0 NaNs
+

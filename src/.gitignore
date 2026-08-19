@@ -1,0 +1,6 @@
+log.*
+*.csv
+*.png
+output
+checkpoints
+saved_checkpoints

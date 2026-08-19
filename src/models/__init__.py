@@ -1,9 +1,11 @@
-from .dataset import LogStateZarrDataset, SyntheticAIDAStateDataset
-from .graph import generate_or_load_edge_index
+# In models/__init__.py
+
+from .dataset import LogStateZarrDataset, LogState4DForecastDataset, SyntheticAIDAStateDataset
 from .gnn import IcosahedralGNNSurrogate
-from .loss import AIDASurrogateLoss, M4MeshOperators, build_icosahedral_differential_operators
-from .amsua import AIDALossEngine, DifferentiableAMSUAOperator
-from .iasi import DifferentiableIASIOperator, IASIRadianceLoss
+from .loss import AIDASurrogateLoss, generate_or_load_edge_index
+from .loss import M4MeshOperators, build_icosahedral_differential_operators
+from .amsua import DifferentiableAMSUAOperator
+from .iasi import DifferentiableIASIOperator
 from .hms import DifferentiableHMSOperator
 from .atms import DifferentiableATMSOperator
 from .cris import DifferentiableCrISOperator
@@ -14,16 +16,15 @@ from .ahicsr import DifferentiableAHICSROperator
 
 __all__ = [
     "LogStateZarrDataset",
+    "LogState4DForecastDataset",
     "SyntheticAIDAStateDataset",
-    "generate_or_load_edge_index",
     "IcosahedralGNNSurrogate",
     "AIDASurrogateLoss",
+    "generate_or_load_edge_index",
     "M4MeshOperators",
     "build_icosahedral_differential_operators",
-    "AIDALossEngine",
     "DifferentiableAMSUAOperator",
     "DifferentiableIASIOperator",
-    "IASIRadianceLoss",
     "DifferentiableHMSOperator",
     "DifferentiableATMSOperator",
     "DifferentiableCrISOperator",

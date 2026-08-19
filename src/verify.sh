@@ -2,6 +2,10 @@
 
 set -x
 
+# python scripts/verify_aida_forecast.py -f forecasts/aida_24h_terrain_forecast.20240730.nc
+
+# exit 1
+
 # 1. Change to working directory
 cd /scratch3/NAGAPE/epic/Wei.Huang/src/starviewerdataassimilation/aida
 #cd /scratch5/purged/Wei.Huang/src/starviewerdataassimilation/aida
