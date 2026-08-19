@@ -3,7 +3,8 @@ s3dir=s3://noaa-gfs-bdp-pds
 
 totalyears=1
 startyear=2024
-#res=0p25
+res=0p25
+#res=1p00
 res=1p00
 forecasthour=f000
 
@@ -55,18 +56,18 @@ do
          do
 	    iflnm=gfs.t${HH}z.pgrb2b.${res}.${forecasthour}
 	    ncflnm=${regular_dir}/gfs.${YYYY}${MM}${DD}.t${HH}z.${res}.${forecasthour}.nc
-	    mlgridflnm=${icosahedral_dir}/icosahedral_logstate_m4.${YYYY}${MM}${DD}.t${HH}z.${res}.${forecasthour}.nc
+	    mlgridflnm=${icosahedral_dir}/icosahedral_logstate_m6.${YYYY}${MM}${DD}.t${HH}z.${res}.${forecasthour}.nc
 
             if [ ! -f ${mlgridflnm} ]
             then
 	       keepgoing=false
-	       tflnm=tmp_${YYYY}${MM}${DD}_gfs.t${HH}z.pgrb2b.${res}.${forecasthour}
+	       tflnm=gribfiles/tmp_${YYYY}${MM}${DD}_gfs.t${HH}z.pgrb2b.${res}.${forecasthour}
 	       if [ ! -f ${ncflnm} ]
 	       then
                   echo "aws s3 cp --no-sign-request ${s3dir}/${fdir}/${HH}/atmos/${iflnm} ${tflnm}"
 	          echo "python interpolate_to_terrain_heights.py --etopo ${datadir}/etopo/ETOPO_2022_v1_60s_N90W180_geoid.nc --input ${tflnm} --output ${ncflnm}"
 	       fi
-	       echo "python interpolate_to_logstate_icosahedral.py -i ${ncflnm} -m ../graph/graph-grid/global_icosahedral_mesh_m4.nc -o ${mlgridflnm}"
+	       echo "python interpolate_to_logstate_icosahedral.py -i ${ncflnm} -m ../graph/graph-grid/global_icosahedral_mesh_m6.nc -o ${mlgridflnm}"
 	       break
             else
 	       fs=$(stat -c %s ${mlgridflnm})
@@ -77,7 +78,7 @@ do
 	          tflnm=tmp_${YYYY}${MM}${DD}_gfs.t${HH}z.pgrb2b.${res}.${forecasthour}
                   echo "aws s3 cp --no-sign-request ${s3dir}/${fdir}/${HH}/atmos/${iflnm} ${tflnm}"
 	          echo "python interpolate_to_terrain_heights.py --etopo ${datadir}/etopo/ETOPO_2022_v1_60s_N90W180_geoid.nc --input ${tflnm} --output ${ncflnm}"
-	          echo "python interpolate_to_logstate_icosahedral.py -i ${ncflnm} -m ../graph/graph-grid/global_icosahedral_mesh_m4.nc -o ${mlgridflnm}"
+	          echo "python interpolate_to_logstate_icosahedral.py -i ${ncflnm} -m ../graph/graph-grid/global_icosahedral_mesh_m6.nc -o ${mlgridflnm}"
 	          break
                fi
             fi

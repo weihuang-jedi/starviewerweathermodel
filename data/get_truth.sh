@@ -1,20 +1,22 @@
 #!/bin/bash
-#SBATCH --job-name=s3_data_transfer
+#SBATCH --job-name=get_data
 #SBATCH --partition=u1-service
 #SBATCH --nodes=1
-#SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=16
-#SBATCH --time=02:00:00
+#SBATCH --ntasks-per-node=16
+#SBATCH --cpus-per-task=1
+#SBATCH --time=12:00:00
 #SBATCH --account=epic
-#SBATCH --output=log.s3_transfer_%j.out
+#SBATCH --output=log.get_data_%j.out
 
 set -x
 
-cd /scratch4/NAGAPE/epic/Wei.Huang/src/starviewerweathermodel/data
+#cd /scratch4/NAGAPE/epic/Wei.Huang/src/starviewerweathermodel/data
+cd /scratch5/purged/Wei.Huang/src/starviewerweathermodel/data
 
 totalyears=1
-startyear=2026
-export res=1p00
+startyear=2024
+#export res=1p00
+export res=0p25
 export fcst=f000
 
 # Activate your custom conda environment
@@ -35,9 +37,9 @@ process_hour() {
    local fcst=$8
 
    local iflnm=gfs.t${HH}z.pgrb2b.${res}.${fcst}
-   local tflnm=tmp_${YYYY}${MM}${DD}.gfs.t${HH}z.pgrb2.${res}.${fcst}
+   local tflnm=gribfiles/tmp_${YYYY}${MM}${DD}.gfs.t${HH}z.pgrb2.${res}.${fcst}
    local ncflnm=terrain-regular-grid/gfs.${YYYY}${MM}${DD}.t${HH}z.${res}.${fcst}.nc
-   local mlgridflnm=icosahedral-truth/icosahedral_logstate_m4.${YYYY}${MM}${DD}.t${HH}z.${res}.${fcst}.nc
+   local mlgridflnm=icosahedral-grid/icosahedral_logstate_m6.${YYYY}${MM}${DD}.t${HH}z.${res}.${fcst}.nc
    local datadir=/scratch4/NAGAPE/epic/Wei.Huang/src/starviewergraphcast/data
 
    if [ ! -f "${mlgridflnm}" ]; then
@@ -55,13 +57,13 @@ process_hour() {
 	    echo "Error to generate: ${ncflnm}. stop"
 	    exit 1
 	 fi
-         rm -f "${tflnm}" *.idx
+         rm -f "${tflnm}" ${tflnm}.idx tmp_${YYYY}${MM}${DD}.gfs.t${HH}z.pgrb2.${res}.${fcst}.idx
       fi
 
       # Run the icosahedral interpolation
       python interpolate_to_logstate_icosahedral.py \
          -i "${ncflnm}" \
-         -m ../graph/graph-grid/global_icosahedral_mesh_m4.nc \
+         -m ../graph/graph-grid/global_icosahedral_mesh_m6.nc \
          -o "${mlgridflnm}"
       if [ ! -f ${mlgridflnm} ]; then
          echo "Error to generate: ${mlgridflnm}. stop"
@@ -114,7 +116,7 @@ generate_tasks() {
 }
 
 # Stream tasks into xargs to run exactly 16 concurrently
-generate_tasks | xargs -P 16 -n 8 bash -c 'process_hour "$@"' _
+generate_tasks | xargs -P 4 -n 8 bash -c 'process_hour "$@"' _
 
 exit 0
 

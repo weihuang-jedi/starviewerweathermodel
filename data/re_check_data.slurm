@@ -23,7 +23,7 @@ rm -rf icosahedral-grid
 python interpolate_to_logstate_icosahedral.py \
   --input_dir terrain-regular-grid \
   --output_dir icosahedral-grid \
-  -m ../graph/graph-grid/global_icosahedral_mesh_m4.nc \
+  -m ../graph/graph-grid/global_icosahedral_mesh_m6.nc \
   --pattern "*.nc"
 
 # 2. Remove old corrupt Zarr directory
@@ -31,7 +31,7 @@ rm -rf icosahedral_logstate.zarr
 
 # 3. Pack clean files into Zarr store
 python pack_icosahedral_zarr.py \
-  -i "icosahedral-grid/icosahedral_logstate_m4.202*.nc" \
+  -i "icosahedral-grid/icosahedral_logstate_m6.202*.nc" \
   -o icosahedral_logstate.zarr \
   -c 32 \
   -l 3
