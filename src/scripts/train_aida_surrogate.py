@@ -188,7 +188,7 @@ def train_epoch(
         # CONDITIONAL SATELLITE RADIANCE LOSSES (Only run if weight > 0.0)
         # ---------------------------------------------------------------------
         # AMSU-A
-        w_rad_amsua = loss_cfg.get("w_rad_amsua", loss_cfg.get("w_rad", 0.0))
+        w_rad_amsua = loss_cfg.get("w_rad_amsua", 0.0)
         if w_rad_amsua > 0.0 and obs_amsua_tb is not None:
             tb_sim = torch.nan_to_num(amsua_op(t_k, p_hpa, **op_kwargs), nan=240.0)
             tb_obs = torch.nan_to_num(obs_amsua_tb.to(device), nan=240.0)

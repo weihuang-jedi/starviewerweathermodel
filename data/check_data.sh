@@ -1,8 +1,10 @@
 #!/bin/bash
-s3dir=s3://noaa-gfs-bdp-pds
 
-totalyears=2
-startyear=2024
+# set -x
+
+s3dir=s3://noaa-gfs-bdp-pds
+totalyears=1
+startyear=2026
 res=0p25
 #res=1p00
 forecasthour=f000

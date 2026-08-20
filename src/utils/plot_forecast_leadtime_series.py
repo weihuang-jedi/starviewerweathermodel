@@ -22,6 +22,9 @@ import cartopy.crs as ccrs
 import cartopy.feature as cfeature
 from scipy.interpolate import griddata
 
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning, module="cartopy")
+
 R_D = 287.058
 
 
@@ -162,6 +165,37 @@ def plot_leadtime_series(
 
     rows, cols = 3, 5
     row_labels = ["Forecast", "Truth", "Error (Fcst - Truth)"]
+
+    print(f'var_name: {var_name}, vmin_state: {vmin_state}, vmax_state: {vmax_state}, vlim_err: {vlim_err}')
+
+    if var_name == 'T':
+        vmin_state = 190.0
+        vmax_state = 320.0
+        vlim_err = 20.0
+    elif var_name == 'P':
+        vmin_state = 850.0
+        vmax_state = 1000.0
+        vlim_err = 50.0
+    elif var_name == 'U':
+        vmin_state = -50.0
+        vmax_state =  50.0
+        vlim_err = 20.0
+    elif var_name == 'V':
+        vmin_state = -50.0
+        vmax_state =  50.0
+        vlim_err = 20.0
+    elif var_name == 'W':
+        vmin_state = -5.0
+        vmax_state =  5.0
+        vlim_err = 2.0
+    elif var_name == 'Q':
+        vmin_state =  0.0
+        vmax_state =  5.0
+        vlim_err = 5.0
+    elif var_name == 'RHO':
+        vmin_state =  0.75
+        vmax_state =  1.5
+        vlim_err = 0.25
 
     for col in range(cols):
         grid_data_list = [fcst_grids[col], truth_grids[col], err_grids[col]]

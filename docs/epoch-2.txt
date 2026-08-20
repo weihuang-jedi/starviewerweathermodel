@@ -1,0 +1,20 @@
++ python utils/plot_forecast_panel_comparison.py -f output/aida.20260101.t12z.0p25.f024.nc -t ../data/icosahedral-truth/icosahedral_logstate_m6.20260102.t12z.0p25.f000.nc -z ../data/icosahedral-truth/icosahedral_logstate_m6.20260101.t12z.0p25.f000.nc -l 10 -o forecast_surface_comparison_panel.png
+
+[PANEL PLOTTER] Loading Forecast : 'output/aida.20260101.t12z.0p25.f024.nc'
+[PANEL PLOTTER] Loading Truth    : '../data/icosahedral-truth/icosahedral_logstate_m6.20260102.t12z.0p25.f000.nc'
+[PANEL PLOTTER] Loading Initial X0: '../data/icosahedral-truth/icosahedral_logstate_m6.20260101.t12z.0p25.f000.nc'
+var name: T, min: 192.13106961204588, max: 440.8629502378048
+var name: T, vlim_total: 195.40435103236655, vlim_error: 183.501998434047
+var name: U, min: -121.10781441118453, max: 236.45724462019544
+var name: U, vlim_total: 221.84277740112827, vlim_error: 222.64916375449684
+var name: V, min: -207.17302461684963, max: 144.76545764677533
+var name: V, vlim_total: 212.3238433594551, vlim_error: 210.2259389270383
+var name: W, min: -26.825180244322006, max: 16.15872467320467
+var name: W, vlim_total: 26.752503836432048, vlim_error: 26.181125473227958
+var name: Q, min: -61.59549542779731, max: 91.6073741947109
+var name: Q, vlim_total: 79.97163209866126, vlim_error: 85.35200843391402
+var name: RHO, min: 0.748072804953476, max: 1.6575671224259858
+var name: RHO, vlim_total: 0.6186975231127375, vlim_error: 0.5526485575377886
+var name: P, min: 855.4881773190594, max: 999.9521847443921
+var name: P, vlim_total: 91.53553694895771, vlim_error: 82.73497023702531
+
