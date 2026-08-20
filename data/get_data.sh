@@ -57,7 +57,7 @@ process_hour() {
 	    echo "Error to generate: ${ncflnm}. stop"
 	    exit 1
 	 fi
-         rm -f "${tflnm}" "${tflnm}.idx"
+         rm -f "${tflnm}" "${tflnm}*.idx"
       fi
 
       # Run the icosahedral interpolation

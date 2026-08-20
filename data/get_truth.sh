@@ -14,7 +14,7 @@ set -x
 cd /scratch5/purged/Wei.Huang/src/starviewerweathermodel/data
 
 totalyears=1
-startyear=2024
+startyear=2026
 #export res=1p00
 export res=0p25
 export fcst=f000
@@ -39,7 +39,8 @@ process_hour() {
    local iflnm=gfs.t${HH}z.pgrb2b.${res}.${fcst}
    local tflnm=gribfiles/tmp_${YYYY}${MM}${DD}.gfs.t${HH}z.pgrb2.${res}.${fcst}
    local ncflnm=terrain-regular-grid/gfs.${YYYY}${MM}${DD}.t${HH}z.${res}.${fcst}.nc
-   local mlgridflnm=icosahedral-grid/icosahedral_logstate_m6.${YYYY}${MM}${DD}.t${HH}z.${res}.${fcst}.nc
+  #local mlgridflnm=icosahedral-grid/icosahedral_logstate_m6.${YYYY}${MM}${DD}.t${HH}z.${res}.${fcst}.nc
+   local mlgridflnm=icosahedral-truth/icosahedral_logstate_m6.${YYYY}${MM}${DD}.t${HH}z.${res}.${fcst}.nc
    local datadir=/scratch4/NAGAPE/epic/Wei.Huang/src/starviewergraphcast/data
 
    if [ ! -f "${mlgridflnm}" ]; then
@@ -57,7 +58,7 @@ process_hour() {
 	    echo "Error to generate: ${ncflnm}. stop"
 	    exit 1
 	 fi
-         rm -f "${tflnm}" ${tflnm}.idx tmp_${YYYY}${MM}${DD}.gfs.t${HH}z.pgrb2.${res}.${fcst}.idx
+         rm -f "${tflnm}" ${tflnm}*.idx
       fi
 
       # Run the icosahedral interpolation
