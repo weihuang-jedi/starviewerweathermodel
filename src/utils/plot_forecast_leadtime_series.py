@@ -213,20 +213,20 @@ def main():
 
     # Match forecast files
     fcst_files = [
-        os.path.join(args.fcst_dir, "aida.20260101.t12z.1p00.f000.nc"),
-        os.path.join(args.fcst_dir, "aida.20260101.t12z.1p00.f006.nc"),
-        os.path.join(args.fcst_dir, "aida.20260101.t12z.1p00.f012.nc"),
-        os.path.join(args.fcst_dir, "aida.20260101.t12z.1p00.f018.nc"),
-        os.path.join(args.fcst_dir, "aida.20260101.t12z.1p00.f024.nc"),
+        os.path.join(args.fcst_dir, "aida.20260101.t12z.0p25.f000.nc"),
+        os.path.join(args.fcst_dir, "aida.20260101.t12z.0p25.f006.nc"),
+        os.path.join(args.fcst_dir, "aida.20260101.t12z.0p25.f012.nc"),
+        os.path.join(args.fcst_dir, "aida.20260101.t12z.0p25.f018.nc"),
+        os.path.join(args.fcst_dir, "aida.20260101.t12z.0p25.f024.nc"),
     ]
 
     # Match corresponding ground truth files
     truth_files = [
-        os.path.join(args.truth_dir, "gfs.20260101.t12z.1p00.f000.nc"),  # +00h
-        os.path.join(args.truth_dir, "gfs.20260101.t18z.1p00.f000.nc"),  # +06h
-        os.path.join(args.truth_dir, "gfs.20260102.t00z.1p00.f000.nc"),  # +12h
-        os.path.join(args.truth_dir, "gfs.20260102.t06z.1p00.f000.nc"),  # +18h
-        os.path.join(args.truth_dir, "gfs.20260102.t12z.1p00.f000.nc"),  # +24h
+        os.path.join(args.truth_dir, "icosahedral_logstate_m6.20260101.t12z.0p25.f000.nc"),  # +00h
+        os.path.join(args.truth_dir, "icosahedral_logstate_m6.20260101.t18z.0p25.f000.nc"),  # +06h
+        os.path.join(args.truth_dir, "icosahedral_logstate_m6.20260102.t00z.0p25.f000.nc"),  # +12h
+        os.path.join(args.truth_dir, "icosahedral_logstate_m6.20260102.t06z.0p25.f000.nc"),  # +18h
+        os.path.join(args.truth_dir, "icosahedral_logstate_m6.20260102.t12z.0p25.f000.nc"),  # +24h
     ]
 
     plot_leadtime_series(
