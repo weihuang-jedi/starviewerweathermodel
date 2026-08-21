@@ -23,8 +23,8 @@ if [ -f checkpoints/aida_gnn_surrogate_logstate.pt ]; then
    mv checkpoints/aida_gnn_surrogate_logstate.pt checkpoints/aida_gnn_surrogate_logstate_${n}.pt
 fi
 
-#gnn_chpt=checkpoints/aida_gnn.pt
-gnn_chpt=checkpoints/aida_gnn_epoch_003.pt
+#gnn_chpt=checkpoints/aida_gnn_epoch_003.pt
+gnn_chpt=checkpoints/aida_gnn.pt
 
 set -x
 

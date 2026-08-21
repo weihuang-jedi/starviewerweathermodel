@@ -4,24 +4,43 @@ models/dataset.py
 -----------------
 Dataset Loaders for AIDA GNN Surrogate Model Training.
 Extracts 3D dynamic atmospheric log-state fields, 3D terrain-following geometric
-height profiles (h_3d), and 2D static topography features (static_topo)
-from Zarr datasets alongside multi-sensor satellite and conventional observations.
+height profiles (h_3d), 2D static topography features (static_topo), and dynamic
+Solar Zenith Angle cos(SZA) forcing from Zarr datasets alongside multi-sensor
+satellite and conventional observations.
 Includes vertical Pressure-to-Height (p -> z) interpolation for conventional observations.
 """
 
 import os
 import glob
+import re
 import numpy as np
 import xarray as xr
 import torch
 from torch.utils.data import Dataset
+from datetime import datetime
+
+
+def compute_solar_zenith_angle(lats_deg: np.ndarray, lons_deg: np.ndarray, timestamp_unix: float) -> np.ndarray:
+    """Computes cosine of Solar Zenith Angle cos(SZA) in [0.0, 1.0] across mesh nodes."""
+    dt = datetime.utcfromtimestamp(timestamp_unix)
+    day_of_year = dt.timetuple().tm_yday
+    hour_utc = dt.hour + dt.minute / 60.0 + dt.second / 3600.0
+
+    rad = np.pi / 180.0
+    declination = 23.45 * np.sin(rad * (360.0 / 365.0) * (day_of_year - 81)) * rad
+    solar_time = hour_utc + (lons_deg / 15.0)
+    hour_angle = (solar_time - 12.0) * 15.0 * rad
+
+    lats_rad = lats_deg * rad
+    cos_sza = np.sin(lats_rad) * np.sin(declination) + np.cos(lats_rad) * np.cos(declination) * np.cos(hour_angle)
+    return np.maximum(0.0, cos_sza).astype(np.float32)
 
 
 class LogStateZarrDataset(Dataset):
     """
     Standard Zarr Dataset Loader for Single-Step AI-DA State Ingestion.
-    Loads [t_0, t_1] background-target pairs along with 3D terrain heights (h_3d)
-    and static surface topography features (static_topo).
+    Loads [t_0, t_1] background-target pairs along with 3D terrain heights (h_3d),
+    static surface topography features, and solar zenith angle cos(SZA) conditioning.
     """
     def __init__(self, zarr_path: str, obs_dir: str = None):
         super().__init__()
@@ -38,6 +57,12 @@ class LogStateZarrDataset(Dataset):
             'ln_t_icosahedral', 'u_icosahedral', 'v_icosahedral',
             'w_icosahedral', 'q_icosahedral', 'ln_rho_icosahedral', 'ln_p_icosahedral'
         ]
+        # Fallback to short names if required
+        for i, v in enumerate(self.var_names):
+            if v not in self.ds:
+                short_v = v.replace('_icosahedral', '')
+                if short_v in self.ds:
+                    self.var_names[i] = short_v
 
         self.times = self.ds['time'].values
         self.num_samples = len(self.times) - 1
@@ -52,12 +77,18 @@ class LogStateZarrDataset(Dataset):
             self.latitudes = np.linspace(-90, 90, self.num_nodes)
             self.longitudes = np.linspace(-180, 180, self.num_nodes)
 
+        if self.latitudes.ndim > 1:
+            self.latitudes = self.latitudes[0]
+        if self.longitudes.ndim > 1:
+            self.longitudes = self.longitudes[0]
+        self.longitudes = np.where(self.longitudes > 180.0, self.longitudes - 360.0, self.longitudes)
+
         # Load Static Surface Features
         self.h_terrain = self._extract_2d_surface_feature(['h_terrain_icosahedral', 'h_terrain', 'elevation'], default_val=0.0)
         self.land_sea_mask = self._extract_2d_surface_feature(['land_sea_mask'], default_val=0.0)
 
         static_topo_raw = np.stack([self.h_terrain / 10000.0, self.land_sea_mask], axis=0)
-        self.static_topo_np = np.nan_to_num(static_topo_raw, nan=0.0, posinf=1.0, neginf=0.0).astype(np.float32)
+        self.static_topo_base = np.nan_to_num(static_topo_raw, nan=0.0, posinf=1.0, neginf=0.0).astype(np.float32)
 
     def _extract_2d_surface_feature(self, candidate_names: list, default_val: float = 0.0) -> np.ndarray:
         for name in candidate_names:
@@ -102,9 +133,7 @@ class LogStateZarrDataset(Dataset):
         if self.obs_dir and os.path.exists(self.obs_dir):
             dt_str = str(time_val)[:13].replace('-', '').replace('T', '.t') + 'z'
 
-            # -----------------------------------------------------------------
-            # 1. Load Multi-Sensor Satellite Observations
-            # -----------------------------------------------------------------
+            # 1. Multi-Sensor Satellite Observations
             obs_file_pattern = os.path.join(self.obs_dir, f"obs_unified.*{dt_str}*.nc")
             matching_files = glob.glob(obs_file_pattern)
 
@@ -144,9 +173,7 @@ class LogStateZarrDataset(Dataset):
                 except Exception:
                     pass
 
-            # -----------------------------------------------------------------
-            # 2. Load Conventional Observations with Vertical p -> z Interpolation
-            # -----------------------------------------------------------------
+            # 2. Conventional Observations with Vertical p -> z Interpolation
             conv_pattern = os.path.join(self.obs_dir, f"obs_conv.*{dt_str}*.nc")
             conv_files = glob.glob(conv_pattern)
 
@@ -154,29 +181,23 @@ class LogStateZarrDataset(Dataset):
                 try:
                     ds_conv = xr.open_dataset(conv_files[0])
                     c_lons = ds_conv['longitude'].values
-                    c_pressures = ds_conv['pressure'].values  # Observation pressure levels in hPa or Pa
-                    c_var_types = ds_conv['variable_type'].values  # Variable type index (0: T, 1: u, 2: v, 4: q, 6: p)
+                    c_pressures = ds_conv['pressure'].values
+                    c_var_types = ds_conv['variable_type'].values
                     c_obs_vals = np.nan_to_num(ds_conv['observation_value'].values, nan=0.0)
 
                     c_node_idx = ((c_lons + 180.0) / 360.0 * (self.num_nodes - 1)).astype(int)
                     c_node_idx = np.clip(c_node_idx, 0, self.num_nodes - 1)
 
-                    # Standardize observation pressure to Pa
                     if np.nanmean(c_pressures) < 2000.0:
                         c_pressures = c_pressures * 100.0
 
-                    # Map observation pressure to 3D grid geometric height z level-by-level
                     for p_obs, v_type, val, n_idx in zip(c_pressures, c_var_types, c_obs_vals, c_node_idx):
                         if 0 <= v_type < self.num_vars and val != 0.0:
-                            # Extract vertical pressure profile at target node
-                            node_p_profile = p_3d_profile[:, n_idx]  # Pa
-
-                            # Perform 1D log-linear interpolation from pressure (p_obs) to height level index
+                            node_p_profile = p_3d_profile[:, n_idx]
                             if p_obs <= node_p_profile[0] and p_obs >= node_p_profile[-1]:
                                 log_p_node = np.log(np.clip(node_p_profile, 1.0, None))
                                 log_p_obs = np.log(np.clip(p_obs, 1.0, None))
 
-                                # Find target level index matching observation pressure
                                 k_idx = int(np.interp(-log_p_obs, -log_p_node, np.arange(self.num_levels)))
                                 k_idx = np.clip(k_idx, 0, self.num_levels - 1)
 
@@ -187,7 +208,6 @@ class LogStateZarrDataset(Dataset):
                 except Exception:
                     pass
 
-        # Convert dictionary to PyTorch Tensors
         clean_obs = {}
         for k, v in obs_dict.items():
             clean_v = np.nan_to_num(v, nan=0.0).astype(np.float32)
@@ -200,7 +220,7 @@ class LogState4DForecastDataset(LogStateZarrDataset):
     """
     4D Observation-Guided Forecast Dataset Loader.
     Loads [x(t-1), x(t)] 2-step trajectory inputs, predicts x(t+1) target state,
-    and extracts 3D terrain-following heights (h_3d) and conventional observations.
+    and extracts 3D terrain-following heights (h_3d), dynamic cos(SZA), and observations.
     """
     def __init__(self, zarr_path: str, obs_dir: str = None):
         super().__init__(zarr_path=zarr_path, obs_dir=obs_dir)
@@ -225,7 +245,7 @@ class LogState4DForecastDataset(LogStateZarrDataset):
         valid_mask_np = ~np.isnan(self.ds[self.var_names[0]].isel(time=idx_plus6).values)
         valid_mask_np = np.nan_to_num(valid_mask_np, nan=False).astype(bool)
 
-        # 3D Terrain-Following Geometric Heights h_3d [32, 2562]
+        # 3D Terrain-Following Geometric Heights h_3d [32, Nodes]
         if 'h_icosahedral' in self.ds:
             h_3d = self.ds['h_icosahedral'].isel(time=idx_zero).values
         elif 'h' in self.ds:
@@ -236,26 +256,34 @@ class LogState4DForecastDataset(LogStateZarrDataset):
 
         h_3d = np.nan_to_num(h_3d, nan=0.0, posinf=20000.0, neginf=0.0).astype(np.float32)
 
-        # Extract 3D pressure profile p_3d [32, 2562] (Pa) for vertical observation interpolation
-        ln_p_3d = self.ds['ln_p_icosahedral'].isel(time=idx_zero).values
+        # Extract 3D pressure profile p_3d (Pa)
+        ln_p_3d = self.ds[self.var_names[6]].isel(time=idx_zero).values
         p_3d_pa = np.exp(np.nan_to_num(ln_p_3d, nan=10.0))
+
+        # Dynamic Solar Zenith Angle Compute
+        time_val = self.times[idx_zero]
+        timestamp_unix = float(np.datetime64(time_val, 's').astype(int))
+        cos_sza = compute_solar_zenith_angle(self.latitudes, self.longitudes, timestamp_unix)
+
+        # Concatenate Solar Conditioning to Static Topography -> [3, Nodes]
+        static_topo = np.concatenate([self.static_topo_base, cos_sza[np.newaxis, :]], axis=0)
 
         item = {
             'input_trajectory': torch.from_numpy(x_trajectory),   # [In_Vars=14, Levels=32, Nodes]
             'target_state': torch.from_numpy(target),             # [Out_Vars=7, Levels=32, Nodes]
             'valid_mask': torch.from_numpy(valid_mask_np),        # [Levels=32, Nodes]
             'h_3d': torch.from_numpy(h_3d),                       # [Levels=32, Nodes]
-            'static_topo': torch.from_numpy(self.static_topo_np), # [Static_Feats=2, Nodes]
+            'static_topo': torch.from_numpy(static_topo),         # [Static_Feats=3, Nodes]
         }
 
-        # Load observations with vertical p -> z interpolation
+        # Load observations
         item.update(self._load_observations_for_time(self.times[idx_plus6], h_3d_profile=h_3d, p_3d_profile=p_3d_pa))
         return item
 
 
 class SyntheticAIDAStateDataset(Dataset):
     """Synthetic Dataset Generator for Dry Testing."""
-    def __init__(self, num_samples: int = 100, num_nodes: int = 2562, num_levels: int = 32):
+    def __init__(self, num_samples: int = 100, num_nodes: int = 40962, num_levels: int = 32):
         super().__init__()
         self.num_samples = num_samples
         self.num_nodes = num_nodes
@@ -266,7 +294,7 @@ class SyntheticAIDAStateDataset(Dataset):
 
         baseline_h = np.linspace(2, 20000, num_levels, dtype=np.float32)
         self.h_3d = np.repeat(baseline_h[:, np.newaxis], num_nodes, axis=1)
-        self.static_topo = np.random.randn(2, num_nodes).astype(np.float32)
+        self.static_topo = np.random.randn(3, num_nodes).astype(np.float32)
 
     def __len__(self):
         return self.num_samples
