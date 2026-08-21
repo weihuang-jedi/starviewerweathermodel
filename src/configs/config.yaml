@@ -21,7 +21,7 @@ model:
   # Terrain-Following 4D Trajectory Architecture Parameters
   in_vars: 14          # Dynamic input channels (7 vars x 2 timesteps: X_-6h, X_0)
   out_vars: 7          # Output channels predicted (ln_t, u, v, w, q, ln_rho, ln_p for X_+6h)
-  num_static_feats: 3  # Static node features account for [elevation, land_sea_mask, cos_sza]
+  num_static_feats: 4  # Static node features account for [elevation, land_sea_mask, cos_sza]
 
 training:
   epochs: 5
