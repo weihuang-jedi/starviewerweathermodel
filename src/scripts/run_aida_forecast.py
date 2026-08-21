@@ -167,32 +167,73 @@ def export_lead_time_netcdf(
     """Saves a single lead-time forecast state as a fully self-contained CF/UGRID NetCDF file."""
     data_vars_out = {}
 
+    # 1. Primary Physical Weather Variables
     for idx, var in enumerate(var_names):
         out_var_name = var if var.endswith("_icosahedral") else f"{var}_icosahedral"
+
+        # Copy original attributes if present in reference dataset
+        var_attrs = {"long_name": f"Forecasted {var}", "mesh": "icosahedral_mesh"}
+        if out_var_name in ds_ref:
+            var_attrs.update(ds_ref[out_var_name].attrs)
+
         data_vars_out[out_var_name] = (
             ["level", "node"],
             state_arr[idx, :, :].astype(np.float32),
-            {"long_name": f"Forecasted {var}", "mesh": "icosahedral_mesh"}
+            var_attrs
         )
+
+    # 2. 3D Geometric Heights
+    h_attrs = {"units": "meters", "long_name": "3D Terrain-Following Geometric Height Above Sea Level", "mesh": "icosahedral_mesh"}
+    if "h_icosahedral" in ds_ref:
+        h_attrs.update(ds_ref["h_icosahedral"].attrs)
 
     data_vars_out["h_icosahedral"] = (
         ["level", "node"],
         h_3d_np,
-        {"units": "meters", "long_name": "3D Terrain-Following Geometric Height Above Sea Level", "mesh": "icosahedral_mesh"}
+        h_attrs
     )
+
+    # 3. Surface Topography Elevation
     data_vars_out["h_terrain_icosahedral"] = (
         ["node"],
         static_topo_np[0] * 10000.0,
         {"units": "meters", "long_name": "Surface Topography Elevation", "mesh": "icosahedral_mesh"}
     )
 
-    for static_var in ["longitude", "latitude", "face_nodes", "x_cartesian", "y_cartesian", "z_cartesian", "land_sea_mask", "elevation"]:
+    # -------------------------------------------------------------------------
+    # 4. COPY TARGET_LEVEL AND ETA DIRECTLY FROM REFERENCE DATASET (ds_ref)
+    # -------------------------------------------------------------------------
+    if "eta" in ds_ref:
+        data_vars_out["eta"] = ds_ref["eta"]
+    else:
+        data_vars_out["eta"] = (
+            ["level"],
+            np.linspace(0.0, 1.0, num_levels, dtype=np.float32),
+            {"long_name": "Eta Coordinate Coefficient", "units": "1"}
+        )
+
+    if "target_level" in ds_ref:
+        data_vars_out["target_level"] = ds_ref["target_level"]
+    else:
+        data_vars_out["target_level"] = (
+            ["level"],
+            np.arange(1, num_levels + 1, dtype=np.int32),
+            {"long_name": "Baseline Flat-Terrain Height Level", "units": "meters"}
+        )
+
+    # 5. Copy Static Surface & Mesh Topology Variables from Reference File
+    static_vars = [
+        "longitude", "latitude", "face_nodes", "x_cartesian", "y_cartesian",
+        "z_cartesian", "land_sea_mask", "elevation", "h_terrain", "icosahedral_mesh"
+    ]
+    for static_var in static_vars:
         if static_var in ds_ref:
             data_vars_out[static_var] = ds_ref[static_var]
 
+    # Coordinates Setup
     coords_out = {
-        "level": np.arange(1, num_levels + 1, dtype=np.int32),
-        "node": np.arange(num_nodes, dtype=np.int32)
+        "level": ds_ref["level"].values if "level" in ds_ref else np.arange(1, num_levels + 1, dtype=np.int32),
+        "node": ds_ref["node"].values if "node" in ds_ref else np.arange(num_nodes, dtype=np.int32)
     }
 
     if "face" in ds_ref.dims:
@@ -204,7 +245,7 @@ def export_lead_time_netcdf(
         data_vars=data_vars_out,
         coords=coords_out,
         attrs={
-            "title": "AIDA GNN 4D Observation-Guided Terrain Weather Forecast",
+            "title": getattr(ds_ref, "title", "AIDA GNN 4D Observation-Guided Terrain Weather Forecast"),
             "conventions": "CF-1.8 UGRID-1.0",
             "forecast_lead_time_hours": lead_time_hours
         }
@@ -213,7 +254,7 @@ def export_lead_time_netcdf(
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     ds_out.to_netcdf(output_path, format="NETCDF4")
     ds_out.close()
-    print(f"  ├─ Saved lead time f{lead_time_hours:03d}h -> '{output_path}'", flush=True)
+    print(f"  ├─ Saved lead time f{lead_time_hours:03d}h -> '{output_path}' (copied target_level & eta from ds_ref)", flush=True)
 
 
 def run_autoregressive_forecast(
@@ -305,6 +346,7 @@ def run_autoregressive_forecast(
                 hour_utc=current_hour_utc
             )
 
+            """
             # Extract X_-6h and X_0 components for Linear Trend Baseline Computation
             x_m6_curr = state_prev[:, 0:7, :, :] if state_prev.shape[1] >= 14 else state_prev
             x_0_curr  = state_curr[:, 7:14, :, :] if state_curr.shape[1] >= 14 else state_curr
@@ -322,6 +364,44 @@ def run_autoregressive_forecast(
 
             # Forward pass through GNN surrogate
             out_model = model(input_traj, edge_index, static_topo=static_topo)
+            """
+
+            # Compute Dynamic Solar Zenith Angle Forcing cos(SZA) for current forecast hour
+            cos_sza_np = compute_solar_zenith_angle(
+                lats_deg=lats_deg,
+                lons_deg=lons_deg,
+                year=base_year,
+                month=base_month,
+                day=base_day,
+                hour_utc=current_hour_utc
+            )
+
+            # -----------------------------------------------------------------
+            # FIX: Convert cos(SZA) to Tensor & Concatenate onto static_topo
+            # Output Shape: [Batch=1, Static_Feats=3, Nodes]
+            # -----------------------------------------------------------------
+            cos_sza_tensor = torch.from_numpy(cos_sza_np).unsqueeze(0).unsqueeze(0).to(device) # [1, 1, Nodes]
+
+            # Combine [Elevation, LSM] (2 channels) + [cos_sza] (1 channel) -> 3 channels
+            static_topo_3ch = torch.cat([static_topo[:, :2, :], cos_sza_tensor], dim=1)
+
+            # Extract X_-6h and X_0 components for Linear Trend Baseline Computation
+            x_m6_curr = state_prev[:, 0:7, :, :] if state_prev.shape[1] >= 14 else state_prev
+            x_0_curr  = state_curr[:, 7:14, :, :] if state_curr.shape[1] >= 14 else state_curr
+
+            # Linear Trend Extrapolation: X_trend = X_0 + (X_0 - X_-6h)
+            x_trend = x_0_curr + (x_0_curr - x_m6_curr)
+
+            # Build 14-channel input trajectory
+            if state_prev.shape[1] == 7 and state_curr.shape[1] == 7:
+                input_traj = torch.cat([state_prev, state_curr], dim=1)
+            elif state_curr.shape[1] == 14:
+                input_traj = state_curr
+            else:
+                input_traj = torch.cat([state_prev[:, :7, :, :], state_curr[:, :7, :, :]], dim=1)
+
+            # Forward pass through GNN surrogate using 3-channel static topology
+            out_model = model(input_traj, edge_index, static_topo=static_topo_3ch)
 
             # -----------------------------------------------------------------
             # 1. CLAMP 6-HOUR INCREMENT DELTAS (Damps Exponential Blow-ups)

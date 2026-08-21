@@ -150,7 +150,9 @@ def train_epoch(
             target=y_batch,
             edge_index=edge_index,
             graph_mesh_ops=graph_mesh_ops,
-            valid_mask=valid_mask
+            valid_mask=valid_mask,
+            h_3d=h_3d,              # Pass 3D height profile for PBL exponential weighting
+            static_topo=static_topo # Pass land-sea mask for drag penalty
         )
         total_loss = loss
 

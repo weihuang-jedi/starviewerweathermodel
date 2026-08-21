@@ -4,9 +4,9 @@ models/dataset.py
 -----------------
 Dataset Loaders for AIDA GNN Surrogate Model Training.
 Extracts 3D dynamic atmospheric log-state fields, 3D terrain-following geometric
-height profiles (h_3d), 2D static topography features (static_topo), and dynamic
-Solar Zenith Angle cos(SZA) forcing from Zarr datasets alongside multi-sensor
-satellite and conventional observations.
+height profiles (h_3d), 2D static topography features (static_topo), dynamic
+Solar Zenith Angle cos(SZA) forcing, and Surface Roughness z0 from Zarr datasets
+alongside multi-sensor satellite and conventional observations.
 Includes vertical Pressure-to-Height (p -> z) interpolation for conventional observations.
 """
 
@@ -40,7 +40,7 @@ class LogStateZarrDataset(Dataset):
     """
     Standard Zarr Dataset Loader for Single-Step AI-DA State Ingestion.
     Loads [t_0, t_1] background-target pairs along with 3D terrain heights (h_3d),
-    static surface topography features, and solar zenith angle cos(SZA) conditioning.
+    static surface topography features, surface roughness z0, and solar zenith angle cos(SZA).
     """
     def __init__(self, zarr_path: str, obs_dir: str = None):
         super().__init__()
@@ -87,8 +87,19 @@ class LogStateZarrDataset(Dataset):
         self.h_terrain = self._extract_2d_surface_feature(['h_terrain_icosahedral', 'h_terrain', 'elevation'], default_val=0.0)
         self.land_sea_mask = self._extract_2d_surface_feature(['land_sea_mask'], default_val=0.0)
 
-        static_topo_raw = np.stack([self.h_terrain / 10000.0, self.land_sea_mask], axis=0)
-        self.static_topo_base = np.nan_to_num(static_topo_raw, nan=0.0, posinf=1.0, neginf=0.0).astype(np.float32)
+        # -----------------------------------------------------------------
+        # ADDED: Surface Roughness Length z0 (meters)
+        # Ocean = 0.0002m, Land Average = 0.1m
+        # -----------------------------------------------------------------
+        z0_map = np.where(self.land_sea_mask > 0.5, 0.1, 0.0002).astype(np.float32)
+        ln_z0_norm = (np.log(z0_map + 1e-5) / 5.0).astype(np.float32)  # Normalized [-2.0, 0.0]
+
+        static_topo_raw = np.stack([
+            self.h_terrain / 10000.0,  # 1. Elevation (normalized)
+            self.land_sea_mask,        # 2. Land-Sea Binary Mask
+            ln_z0_norm                 # 3. Surface Roughness length (normalized)
+        ], axis=0)
+        self.static_topo_base = np.nan_to_num(static_topo_raw, nan=0.0, posinf=1.0, neginf=-2.0).astype(np.float32)
 
     def _extract_2d_surface_feature(self, candidate_names: list, default_val: float = 0.0) -> np.ndarray:
         for name in candidate_names:
@@ -220,7 +231,7 @@ class LogState4DForecastDataset(LogStateZarrDataset):
     """
     4D Observation-Guided Forecast Dataset Loader.
     Loads [x(t-1), x(t)] 2-step trajectory inputs, predicts x(t+1) target state,
-    and extracts 3D terrain-following heights (h_3d), dynamic cos(SZA), and observations.
+    and extracts 3D terrain-following heights (h_3d), dynamic cos(SZA), z0, and observations.
     """
     def __init__(self, zarr_path: str, obs_dir: str = None):
         super().__init__(zarr_path=zarr_path, obs_dir=obs_dir)
@@ -265,7 +276,8 @@ class LogState4DForecastDataset(LogStateZarrDataset):
         timestamp_unix = float(np.datetime64(time_val, 's').astype(int))
         cos_sza = compute_solar_zenith_angle(self.latitudes, self.longitudes, timestamp_unix)
 
-        # Concatenate Solar Conditioning to Static Topography -> [3, Nodes]
+        # Concatenate Solar Conditioning to Base Static Topography -> [4, Nodes]
+        # Channels: [0: Elevation, 1: Land-Sea Mask, 2: Roughness z0, 3: cos(SZA)]
         static_topo = np.concatenate([self.static_topo_base, cos_sza[np.newaxis, :]], axis=0)
 
         item = {
@@ -273,7 +285,7 @@ class LogState4DForecastDataset(LogStateZarrDataset):
             'target_state': torch.from_numpy(target),             # [Out_Vars=7, Levels=32, Nodes]
             'valid_mask': torch.from_numpy(valid_mask_np),        # [Levels=32, Nodes]
             'h_3d': torch.from_numpy(h_3d),                       # [Levels=32, Nodes]
-            'static_topo': torch.from_numpy(static_topo),         # [Static_Feats=3, Nodes]
+            'static_topo': torch.from_numpy(static_topo),         # [Static_Feats=4, Nodes]
         }
 
         # Load observations
@@ -294,7 +306,7 @@ class SyntheticAIDAStateDataset(Dataset):
 
         baseline_h = np.linspace(2, 20000, num_levels, dtype=np.float32)
         self.h_3d = np.repeat(baseline_h[:, np.newaxis], num_nodes, axis=1)
-        self.static_topo = np.random.randn(3, num_nodes).astype(np.float32)
+        self.static_topo = np.random.randn(4, num_nodes).astype(np.float32)
 
     def __len__(self):
         return self.num_samples

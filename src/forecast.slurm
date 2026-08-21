@@ -11,7 +11,7 @@
 #SBATCH --export=NONE
 
 # SVGHOME=/scratch4/NAGAPE/epic/Wei.Huang/src/starviewerweathermodel
-SVGHOME=/scratch5/purged/Wei.Huang/src/starviewerweathermodel/src
+SVGHOME=/scratch5/purged/Wei.Huang/src/starviewerweathermodel
 source ${SVGHOME}/svg.env
 cd ${SVGHOME}/src
 

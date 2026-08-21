@@ -2,9 +2,9 @@
 """
 models/loss.py
 --------------
-Composite Physical Balance, Mesh Laplacian, Thermal Drift, and Standardized Loss Engine for AIDA GNN.
-Standardizes target state channels using variable-specific means/stds and enforces physical
-barriers on un-normalized physical specific humidity (Q >= 0) and global thermal equilibrium.
+Composite Physical Balance, Mesh Laplacian, Thermal Drift, Boundary Layer, 
+and Standardized Loss Engine for AIDA GNN Surrogate Model.
+Enforces PBL height weighting, Monin-Obukhov drag penalties, and lapse rate bounds.
 """
 
 import os
@@ -101,7 +101,7 @@ def generate_or_load_edge_index(num_nodes: int, edge_file: str = None) -> torch.
 
 
 class AIDASurrogateLoss(nn.Module):
-    """Standardized Physical Balance and Reconstruction Loss Engine."""
+    """Standardized Physical Balance, PBL Height-Weighted, and Surface Drag Loss Engine."""
     def __init__(
         self,
         w_mse: float = 1.0,
@@ -110,6 +110,8 @@ class AIDASurrogateLoss(nn.Module):
         lambda_laplacian_p: float = 0.01,
         lambda_asym_q: float = 0.05,
         lambda_thermal: float = 0.1,
+        lambda_pbl_drag: float = 0.05,
+        lambda_lapse_rate: float = 0.02,
         num_levels: int = 32,
         **kwargs
     ):
@@ -120,6 +122,8 @@ class AIDASurrogateLoss(nn.Module):
         self.lambda_laplacian_p = lambda_laplacian_p
         self.lambda_asym_q = lambda_asym_q
         self.lambda_thermal = lambda_thermal
+        self.lambda_pbl_drag = lambda_pbl_drag
+        self.lambda_lapse_rate = lambda_lapse_rate
         self.num_levels = num_levels
 
         # Order: [ln_t, u, v, w, q, ln_rho, ln_p]
@@ -141,7 +145,9 @@ class AIDASurrogateLoss(nn.Module):
         target: torch.Tensor,
         edge_index: torch.Tensor,
         graph_mesh_ops: nn.Module = None,
-        valid_mask: torch.Tensor = None
+        valid_mask: torch.Tensor = None,
+        h_3d: torch.Tensor = None,
+        static_topo: torch.Tensor = None
     ):
         metrics = {}
 
@@ -151,28 +157,45 @@ class AIDASurrogateLoss(nn.Module):
         pred_norm = (pred_clean - self.var_means) / self.var_stds
         target_norm = (target_clean - self.var_means) / self.var_stds
 
-        # 1. Base Feature-Standardized MSE Loss
+        # -----------------------------------------------------------------
+        # 1. Exponential Planetary Boundary Layer (PBL) Loss Weighting
+        # Boosts loss gradients at z <= 2000m by up to 4x to fix L01-L15 skill drop
+        # -----------------------------------------------------------------
+        if h_3d is not None:
+            # h_3d shape: [Batch, Levels, Nodes] or [Levels, Nodes]
+            if h_3d.dim() == 2:
+                h_3d_4d = h_3d.unsqueeze(0).unsqueeze(1)  # [1, 1, 32, Nodes]
+            elif h_3d.dim() == 3:
+                h_3d_4d = h_3d.unsqueeze(1)               # [B, 1, 32, Nodes]
+            else:
+                h_3d_4d = h_3d
+
+            pbl_weight = 1.0 + 3.0 * torch.exp(-h_3d_4d.to(pred.device) / 1500.0)
+        else:
+            pbl_weight = 1.0
+
+        diff_sq = (pred_norm - target_norm) ** 2
+        weighted_diff_sq = diff_sq * pbl_weight
+
         if valid_mask is not None:
             mask_7d = valid_mask.unsqueeze(1).expand_as(pred_norm)
-            diff_sq = (pred_norm - target_norm) ** 2
-            loss_mse = torch.sum(diff_sq * mask_7d) / (torch.sum(mask_7d) * 7.0 + 1e-8)
+            loss_mse = torch.sum(weighted_diff_sq * mask_7d) / (torch.sum(mask_7d) * 7.0 + 1e-8)
         else:
-            loss_mse = F.mse_loss(pred_norm, target_norm)
+            loss_mse = torch.mean(weighted_diff_sq)
 
         loss_mse = torch.nan_to_num(loss_mse, nan=0.0)
         metrics["loss_mse"] = loss_mse.item()
         total_loss = self.w_mse * loss_mse
 
-        # 2. Asymmetric Physical Moisture Barrier Loss (Enforced on PHYSICAL Q in kg/kg)
-        # Un-normalize specific humidity channel (index 4)
-        q_phys = pred_clean[:, 4, :, :] * self.std_q + self.mu_q  # Physical Q in kg/kg
+        # 2. Asymmetric Physical Moisture Barrier Loss (q_phys >= 0 kg/kg)
+        q_phys = pred_clean[:, 4, :, :] * self.std_q + self.mu_q
         q_neg_penalty = torch.relu(-q_phys + 1e-7) ** 2
-        loss_asym_q = torch.mean(q_neg_penalty) * 1000.0  # Scale multiplier
+        loss_asym_q = torch.mean(q_neg_penalty) * 1000.0
         loss_asym_q = torch.nan_to_num(loss_asym_q, nan=0.0)
         metrics["loss_asym_q"] = loss_asym_q.item()
         total_loss += (self.lambda_asym_q * loss_asym_q)
 
-        # 3. Global Hemisphere Thermal Balance Penalty (Prevents Continental Warm Drift)
+        # 3. Global Thermal Equilibrium Balance
         ln_t_pred = pred_clean[:, 0, :, :]
         ln_t_target = target_clean[:, 0, :, :]
         loss_thermal_balance = (torch.mean(ln_t_pred) - torch.mean(ln_t_target)) ** 2
@@ -180,7 +203,40 @@ class AIDASurrogateLoss(nn.Module):
         metrics["loss_thermal_balance"] = loss_thermal_balance.item()
         total_loss += (self.lambda_thermal * loss_thermal_balance)
 
-        # 4. Graph Laplacian Smoothness Penalty on Pressure
+        # -----------------------------------------------------------------
+        # 4. Surface Drag & Boundary Layer Friction Penalty (Levels 0..3)
+        # Prevents U, V surface wind speed overestimation (L01 RMSE = 22.0 m/s)
+        # -----------------------------------------------------------------
+        if self.lambda_pbl_drag > 0.0 and static_topo is not None:
+            u_sfc = pred_clean[:, 1, :4, :]
+            v_sfc = pred_clean[:, 2, :4, :]
+            lsm = static_topo[:, 1, :].unsqueeze(1)  # Land-sea mask [B, 1, Nodes]
+            cd_drag = torch.where(lsm > 0.5, 0.005, 0.0015)
+            loss_drag = torch.mean(cd_drag * (u_sfc**2 + v_sfc**2))
+            loss_drag = torch.nan_to_num(loss_drag, nan=0.0)
+            metrics["loss_pbl_drag"] = loss_drag.item()
+            total_loss += (self.lambda_pbl_drag * loss_drag)
+
+        # -----------------------------------------------------------------
+        # 5. Planetary Boundary Layer Lapse Rate Constraint
+        # Restricts dT/dz between surface (L01) and PBL top (L08 ~ 2000m)
+        # -----------------------------------------------------------------
+        if self.lambda_lapse_rate > 0.0 and h_3d is not None:
+            t_sfc = torch.exp(pred_clean[:, 0, 0, :] * self.std_ln_t + self.mu_ln_t)
+            t_pbl = torch.exp(pred_clean[:, 0, 7, :] * self.std_ln_t + self.mu_ln_t)
+
+            h_sfc = h_3d_4d[:, 0, 0, :]
+            h_pbl = h_3d_4d[:, 0, 7, :]
+            dz_pbl = torch.clamp(h_pbl - h_sfc, min=100.0)
+
+            dT_dz_pred = (t_pbl - t_sfc) / dz_pbl  # K/m
+            # Penalize super-adiabatic lapse rates steeper than -0.012 K/m
+            loss_lapse = torch.mean(torch.relu(-dT_dz_pred - 0.012)**2) * 100.0
+            loss_lapse = torch.nan_to_num(loss_lapse, nan=0.0)
+            metrics["loss_lapse_rate"] = loss_lapse.item()
+            total_loss += (self.lambda_lapse_rate * loss_lapse)
+
+        # 6. Graph Laplacian Smoothness Penalty on Pressure
         p_pred = pred_clean[:, 6, :, :]
         src, dst = edge_index[0], edge_index[1]
         diff_p = p_pred[:, :, src] - p_pred[:, :, dst]
@@ -189,7 +245,7 @@ class AIDASurrogateLoss(nn.Module):
         metrics["loss_laplacian_p"] = loss_laplacian_p.item()
         total_loss += (self.lambda_laplacian_p * loss_laplacian_p)
 
-        # 5. Geostrophic Dynamics Penalty
+        # 7. Geostrophic Dynamics Penalty
         if self.lambda_dyn > 0.0 and graph_mesh_ops is not None and hasattr(graph_mesh_ops, "Gx_sparse"):
             u_pred = pred_clean[:, 1, :, :]
             v_pred = pred_clean[:, 2, :, :]
