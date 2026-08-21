@@ -21,6 +21,9 @@ import cartopy.crs as ccrs
 import cartopy.feature as cfeature
 from scipy.interpolate import griddata
 
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning, module="cartopy")
+
 R_D = 287.058
 
 
@@ -179,9 +182,51 @@ def make_comparison_panel_plot(
         vlim_total = max(abs(np.nanmin(delt_total_grid)), abs(np.nanmax(delt_total_grid))) or 1e-3
         vlim_error = max(abs(np.nanmin(delt_error_grid)), abs(np.nanmax(delt_error_grid))) or 1e-3
 
+        print(f'var name: {var_name}, min: {vmin_state}, max: {vmax_state}')
+        print(f'var name: {var_name}, vlim_total: {vlim_total}, vlim_error: {vlim_error}')
+
+        if var_name == 'T':
+            vmin_state = 190.0
+            vmax_state = 320.0
+            vlim_total = 20.0
+            vlim_error = 20.0
+        elif var_name == 'P':
+            vmin_state = 850.0
+            vmax_state = 1000.0
+            vlim_total = 50.0
+            vlim_error = 50.0
+        elif var_name == 'U':
+            vmin_state = -50.0
+            vmax_state =  50.0
+            vlim_total = 20.0
+            vlim_error = 20.0
+        elif var_name == 'V':
+            vmin_state = -50.0
+            vmax_state =  50.0
+            vlim_total = 20.0
+            vlim_error = 20.0
+        elif var_name == 'W':
+            vmin_state = -5.0
+            vmax_state =  5.0
+            vlim_total = 2.0
+            vlim_error = 2.0
+        elif var_name == 'Q':
+            vmin_state =  0.0
+            vmax_state =  5.0
+            vlim_total = 5.0
+            vlim_error = 5.0
+        elif var_name == 'RHO':
+            vmin_state =  0.75
+            vmax_state =  1.5
+            vlim_total = 0.25
+            vlim_error = 0.25
+
+        # print(f'\t\tvar name: {var_name}, new min: {vmin_state}, new max: {vmax_state}')
+        # print(f'\t\tvar name: {var_name}, new vlim_total: {vlim_total}, new vlim_error: {vlim_error}')
+
         for row_idx, (data_grid, title, cmap, is_diff) in enumerate(row_data):
             ax = fig.add_subplot(rows, cols, row_idx * cols + col_idx + 1, projection=proj)
-            ax.add_feature(cfeature.COASTLINE, linewidth=0.6, color='black', alpha=0.7)
+            ax.add_feature(cfeature.COASTLINE, linewidth=0.6, color='black', alpha=0.7, facecolor='gray')
             ax.add_feature(cfeature.BORDERS, linewidth=0.3, color='gray', alpha=0.5)
 
             if is_diff:

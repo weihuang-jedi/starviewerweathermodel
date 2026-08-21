@@ -105,8 +105,8 @@ def verify_boundary_edges(edge_index_path: str, mesh_nc_path: str, lon_threshold
 
 def main():
     parser = argparse.ArgumentParser(description="Verify 0/360 boundary connectivity on icosahedral PyG edge_index tensors.")
-    parser.add_argument("-e", "--edge_file", default="graph-grid/edge_index_m4.pt", help="Path to edge_index_m*.pt")
-    parser.add_argument("-m", "--mesh_file", default="graph-grid/global_icosahedral_mesh_m4.nc", help="Path to global_icosahedral_mesh_m*.nc")
+    parser.add_argument("-e", "--edge_file", default="graph-grid/edge_index_m6.pt", help="Path to edge_index_m*.pt")
+    parser.add_argument("-m", "--mesh_file", default="graph-grid/global_icosahedral_mesh_m6.nc", help="Path to global_icosahedral_mesh_m*.nc")
     args = parser.parse_args()
 
     verify_boundary_edges(args.edge_file, args.mesh_file)

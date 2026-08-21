@@ -12,11 +12,12 @@ set -x
 
 source /scratch4/NAGAPE/epic/Wei.Huang/src/starviewerdataassimilation/svg.env
 
-cd /scratch4/NAGAPE/epic/Wei.Huang/src/starviewerweathermodel/data
+# cd /scratch4/NAGAPE/epic/Wei.Huang/src/starviewerweathermodel/data
+cd /scratch5/purged/Wei.Huang/src/starviewerweathermodel/data
 
 python pack_icosahedral_zarr.py \
-  -i "icosahedral-grid/gfs.202*.nc" \
+  -i "icosahedral-grid/icosahedral_logstate_m6.202*.nc" \
   -o icosahedral_logstate.zarr \
-  -c 32 \
+  -c 4 \
   -l 3
 

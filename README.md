@@ -25,12 +25,12 @@ git push -u origin develop
 
 2. check connection
 
-   python check_pt_graph.py -f graph-grid/icosahedral_edge_index_m4.pt
+   python check_pt_graph.py -f graph-grid/icosahedral_edge_index_m6.pt
    python verify_boundary_connectivity.py
 
 3. append static geography data to mesh
 
-   for lvl in 0 1 2 3 4
+   for lvl in 0 1 2 3 4 5 6
    do
       python append_static_to_icosahedral.py \
          --mesh graph-grid/global_icosahedral_mesh_m${lvl}.nc \

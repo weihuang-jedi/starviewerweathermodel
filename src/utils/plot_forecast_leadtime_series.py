@@ -22,6 +22,9 @@ import cartopy.crs as ccrs
 import cartopy.feature as cfeature
 from scipy.interpolate import griddata
 
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning, module="cartopy")
+
 R_D = 287.058
 
 
@@ -125,8 +128,12 @@ def plot_leadtime_series(
     title_str, unit_str = var_titles.get(var_name.upper(), (var_name, ''))
 
     # Regular 2D Interpolation Grid (1.0 degree)
-    reg_lon = np.linspace(-180, 180, 360)
-    reg_lat = np.linspace(-90, 90, 180)
+    #for M4
+    # reg_lon = np.linspace(-180, 180, 360)
+    # reg_lat = np.linspace(-90, 90, 180)
+    #for M6
+    reg_lon = np.linspace(-180, 180, 1440)
+    reg_lat = np.linspace(-90, 90, 720)
     grid_lon, grid_lat = np.meshgrid(reg_lon, reg_lat)
 
     fcst_grids, truth_grids, err_grids = [], [], []
@@ -158,6 +165,37 @@ def plot_leadtime_series(
 
     rows, cols = 3, 5
     row_labels = ["Forecast", "Truth", "Error (Fcst - Truth)"]
+
+    print(f'var_name: {var_name}, vmin_state: {vmin_state}, vmax_state: {vmax_state}, vlim_err: {vlim_err}')
+
+    if var_name == 'T':
+        vmin_state = 190.0
+        vmax_state = 320.0
+        vlim_err = 20.0
+    elif var_name == 'P':
+        vmin_state = 850.0
+        vmax_state = 1000.0
+        vlim_err = 50.0
+    elif var_name == 'U':
+        vmin_state = -50.0
+        vmax_state =  50.0
+        vlim_err = 20.0
+    elif var_name == 'V':
+        vmin_state = -50.0
+        vmax_state =  50.0
+        vlim_err = 20.0
+    elif var_name == 'W':
+        vmin_state = -5.0
+        vmax_state =  5.0
+        vlim_err = 2.0
+    elif var_name == 'Q':
+        vmin_state =  0.0
+        vmax_state =  5.0
+        vlim_err = 5.0
+    elif var_name == 'RHO':
+        vmin_state =  0.75
+        vmax_state =  1.5
+        vlim_err = 0.25
 
     for col in range(cols):
         grid_data_list = [fcst_grids[col], truth_grids[col], err_grids[col]]
@@ -209,20 +247,20 @@ def main():
 
     # Match forecast files
     fcst_files = [
-        os.path.join(args.fcst_dir, "aida.20260101.t12z.1p00.f000.nc"),
-        os.path.join(args.fcst_dir, "aida.20260101.t12z.1p00.f006.nc"),
-        os.path.join(args.fcst_dir, "aida.20260101.t12z.1p00.f012.nc"),
-        os.path.join(args.fcst_dir, "aida.20260101.t12z.1p00.f018.nc"),
-        os.path.join(args.fcst_dir, "aida.20260101.t12z.1p00.f024.nc"),
+        os.path.join(args.fcst_dir, "aida.20260101.t12z.0p25.f000.nc"),
+        os.path.join(args.fcst_dir, "aida.20260101.t12z.0p25.f006.nc"),
+        os.path.join(args.fcst_dir, "aida.20260101.t12z.0p25.f012.nc"),
+        os.path.join(args.fcst_dir, "aida.20260101.t12z.0p25.f018.nc"),
+        os.path.join(args.fcst_dir, "aida.20260101.t12z.0p25.f024.nc"),
     ]
 
     # Match corresponding ground truth files
     truth_files = [
-        os.path.join(args.truth_dir, "gfs.20260101.t12z.1p00.f000.nc"),  # +00h
-        os.path.join(args.truth_dir, "gfs.20260101.t18z.1p00.f000.nc"),  # +06h
-        os.path.join(args.truth_dir, "gfs.20260102.t00z.1p00.f000.nc"),  # +12h
-        os.path.join(args.truth_dir, "gfs.20260102.t06z.1p00.f000.nc"),  # +18h
-        os.path.join(args.truth_dir, "gfs.20260102.t12z.1p00.f000.nc"),  # +24h
+        os.path.join(args.truth_dir, "icosahedral_logstate_m6.20260101.t12z.0p25.f000.nc"),  # +00h
+        os.path.join(args.truth_dir, "icosahedral_logstate_m6.20260101.t18z.0p25.f000.nc"),  # +06h
+        os.path.join(args.truth_dir, "icosahedral_logstate_m6.20260102.t00z.0p25.f000.nc"),  # +12h
+        os.path.join(args.truth_dir, "icosahedral_logstate_m6.20260102.t06z.0p25.f000.nc"),  # +18h
+        os.path.join(args.truth_dir, "icosahedral_logstate_m6.20260102.t12z.0p25.f000.nc"),  # +24h
     ]
 
     plot_leadtime_series(

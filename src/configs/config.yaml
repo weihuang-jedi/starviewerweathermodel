@@ -4,13 +4,14 @@
 # ==============================================================================
 
 paths:
-  zarr_path: "../data/icosahedral_logstate.zarr"
-  obs_dir: "../data/all_NNJA_data_2024"
-  edges_path: "../graph/graph-grid/icosahedral_edge_index_m4.pt"
-  checkpoint_path: "checkpoints/aida_gnn_conv_only.pt"
+  zarr_path: "/scratch5/purged/Wei.Huang/src/starviewerweathermodel/data/icosahedral_logstate.zarr"
+  obs_dir: "/scratch4/NAGAPE/epic/Wei.Huang/src/starviewerweathermodel/data/all_NNJA_data_2024"
+  edges_path: "/scratch5/purged/Wei.Huang/src/starviewerweathermodel/graph/graph-grid/icosahedral_edge_index_m6.pt"
+  checkpoint_path: "checkpoints/aida_gnn.pt"
 
 mesh:
-  num_nodes: 2562
+  name: "icosahedral_m6"
+  num_nodes: 40962
   num_levels: 32
   samples: 100
 
@@ -20,19 +21,19 @@ model:
   # Terrain-Following 4D Trajectory Architecture Parameters
   in_vars: 14          # Dynamic input channels (7 vars x 2 timesteps: X_-6h, X_0)
   out_vars: 7          # Output channels predicted (ln_t, u, v, w, q, ln_rho, ln_p for X_+6h)
-  num_static_feats: 2  # Static node features (Surface Elevation + Land-Sea Mask)
+  num_static_feats: 3  # Static node features account for [elevation, land_sea_mask, cos_sza]
 
 training:
-  epochs: 40
-  batch_size: 4        # Batch size per GPU (lowered to fit memory)
-  accum_steps: 4       # Gradient accumulation steps (Effective batch size = 16)
+  epochs: 5
+  batch_size: 1        # Batch size per GPU (lowered to fit memory)
+  accum_steps: 8       # Gradient accumulation steps (Effective batch size = 16)
   lr: 0.0003                   # Base Learning Rate
   warmup_epochs: 3             # 3-Epoch linear learning rate warmup
   weight_decay: 0.0001
   log_interval: 1
   save_interval: 1
-  log_batch_freq: 50
-  resume_checkpoint: "checkpoints/aida_gnn_conv_amsua_iasi.pt"
+  log_batch_freq: 10
+  # resume_checkpoint: "checkpoints/aida_gnn.pt"
 
 loss_weights:
   # Base Reconstruction & Physical Regularization
@@ -42,7 +43,8 @@ loss_weights:
   weight_grad_state: 0.25
   lambda_p_acc: 0.15
   lambda_asym_p: 0.35
-  lambda_asym_q: 0.05
+  lambda_asym_q: 0.5        # Active physical non-negative moisture penalty
+  lambda_thermal: 0.1       # Active global thermal balance penalty
   lambda_laplacian_p: 0.01
   weight_state_eq: 0.12
   weight_q_log: 0.25
@@ -50,10 +52,9 @@ loss_weights:
   tau_min_p: 0.08
 
   # Differentiable Multi-Sensor Satellite Radiance Loss Weights (9 Instruments)
-  w_rad: 0.0          # AMSU-A Fallback
   w_rad_amsua: 0.05    # AMSU-A Temperature Sounder
   w_rad_iasi: 0.05     # IASI Hyperspectral Sounder
-  w_rad_hms: 0.05      # HMS Surface/Atmospheric Microwave Sounder
+  w_rad_hms: 0.00      # HMS Surface/Atmospheric Microwave Sounder
   w_rad_atms: 0.0     # ATMS Advanced Microwave Sounder
   w_rad_cris: 0.0     # CrIS Cross-track Infrared Sounder
   w_rad_seviri: 0.0   # SEVIRI Geostationary Sounder
