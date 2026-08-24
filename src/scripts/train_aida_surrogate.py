@@ -349,6 +349,13 @@ def train_model(cfg: dict):
         num_layers=model_cfg.get("num_layers", 4)
     ).to(device)
 
+    # Compute total trainable parameters
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    total_params = sum(p.numel() for p in model.parameters())
+
+    print(f"[MODEL] Total Parameters    : {total_params:,}", flush=True)
+    print(f"[MODEL] Trainable Parameters: {trainable_params:,}", flush=True)
+
     criterion = AIDASurrogateLoss(num_levels=num_levels, **loss_cfg).to(device)
 
     # Initialize Radiance Operators

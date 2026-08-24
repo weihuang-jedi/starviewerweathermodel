@@ -119,10 +119,11 @@ def load_state_from_file(file_path: str, var_names: list):
         h_3d_np = h_3d_np[0]
 
     # 4. Extract Static Surface Topography [2, Nodes] (Elevation + Land-Sea Mask)
+    # Inside load_state_from_file() in scripts/run_aida_forecast.py
+
+    # Extract Static Surface Features
     if 'h_terrain_icosahedral' in ds:
         h_terrain = ds['h_terrain_icosahedral'].values
-    elif 'h_terrain' in ds:
-        h_terrain = ds['h_terrain'].values
     elif 'elevation' in ds:
         h_terrain = ds['elevation'].values
     else:
@@ -138,7 +139,16 @@ def load_state_from_file(file_path: str, var_names: list):
     if ls_mask.ndim > 1:
         ls_mask = ls_mask[0]
 
-    static_topo_np = np.stack([h_terrain.astype(np.float32) / 10000.0, ls_mask.astype(np.float32)], axis=0)
+    # Compute Normalized Roughness z0 (Ocean = 0.0002m, Land = 0.1m)
+    z0_map = np.where(ls_mask > 0.5, 0.1, 0.0002).astype(np.float32)
+    ln_z0_norm = (np.log(z0_map + 1e-5) / 5.0).astype(np.float32)
+
+    # Base static topo: 3 channels [Elevation, LSM, z0]
+    static_topo_np = np.stack([
+        h_terrain.astype(np.float32) / 10000.0,
+        ls_mask.astype(np.float32),
+        ln_z0_norm
+    ], axis=0)
 
     return state_np, h_3d_np.astype(np.float32), static_topo_np, lats.astype(np.float32), lons.astype(np.float32), ds
 
@@ -401,7 +411,13 @@ def run_autoregressive_forecast(
                 input_traj = torch.cat([state_prev[:, :7, :, :], state_curr[:, :7, :, :]], dim=1)
 
             # Forward pass through GNN surrogate using 3-channel static topology
-            out_model = model(input_traj, edge_index, static_topo=static_topo_3ch)
+            # out_model = model(input_traj, edge_index, static_topo=static_topo_3ch)
+            # Concatenate 3-channel base static topo + 1-channel cos(SZA) -> 4 channels
+            # Channels: [0: Elevation, 1: LSM, 2: Roughness z0, 3: cos_SZA]
+            static_topo_4ch = torch.cat([static_topo, cos_sza_tensor], dim=1)
+
+            # Forward pass through GNN surrogate with 4-channel static topo
+            out_model = model(input_traj, edge_index, static_topo=static_topo_4ch)
 
             # -----------------------------------------------------------------
             # 1. CLAMP 6-HOUR INCREMENT DELTAS (Damps Exponential Blow-ups)

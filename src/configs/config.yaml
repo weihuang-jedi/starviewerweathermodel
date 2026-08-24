@@ -24,7 +24,7 @@ model:
   num_static_feats: 4  # Static node features account for [elevation, land_sea_mask, cos_sza]
 
 training:
-  epochs: 5
+  epochs: 10
   batch_size: 1        # Batch size per GPU (lowered to fit memory)
   accum_steps: 8       # Gradient accumulation steps (Effective batch size = 16)
   lr: 0.0003                   # Base Learning Rate
