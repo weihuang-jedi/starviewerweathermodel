@@ -58,7 +58,7 @@ class IcosahedralGNNSurrogate(nn.Module):
         self,
         in_vars: int = 14,          # Input variables (7 vars @ t-6h, 7 vars @ t0)
         out_vars: int = 7,          # Output variables (ln_t, u, v, w, q, ln_rho, ln_p)
-        num_static_feats: int = 2,  # Static terrain features (Elevation + Land-Sea Mask)
+        num_static_feats: int = 4,  # Static terrain features (Elevation + Land-Sea Mask)
         hidden_dim: int = 256,
         num_levels: int = 32,
         num_layers: int = 6
@@ -71,8 +71,10 @@ class IcosahedralGNNSurrogate(nn.Module):
         self.num_levels = num_levels
         self.num_layers = num_layers
 
-        total_in_dim = (in_vars * num_levels) + num_static_feats
-
+        if in_vars > 50:
+            total_in_dim = in_vars
+        else:
+            total_in_dim = (in_vars * num_levels) + num_static_feats
         self.encoder = nn.Linear(total_in_dim, hidden_dim)
         self.gnn_layers = nn.ModuleList([
             GraphConvBlock(hidden_dim=hidden_dim) for _ in range(num_layers)
@@ -105,10 +107,10 @@ class IcosahedralGNNSurrogate(nn.Module):
     ) -> torch.Tensor:
         """
         Args:
-            x_dynamic: Dynamic trajectory [Batch, In_Vars=14, Levels=32, Nodes=2562]
+            x_dynamic: Dynamic trajectory [Batch, 14, 32, Nodes]
                        Channels 0..6: X_-6h | Channels 7..13: X_0
             edge_index: Edge graph topology [2, Num_Edges]
-            static_topo: Surface features [Batch, Static_Feats=2, Nodes]
+            static_topo: Surface features [Batch, Static_Feats (3 or 4), Nodes]
         """
         x_dynamic = torch.nan_to_num(x_dynamic, nan=0.0, posinf=10.0, neginf=-10.0)
         if static_topo is not None:
@@ -131,7 +133,7 @@ class IcosahedralGNNSurrogate(nn.Module):
                 static_topo = static_topo.unsqueeze(0).expand(batch_size, -1, -1)
             x_flat = torch.cat([x_flat, static_topo], dim=1)
 
-        x_flat = x_flat.permute(0, 2, 1)  # [Batch, Nodes, Channels]
+        x_flat = x_flat.permute(0, 2, 1)  # [Batch, Nodes, Channels] -> [1, 40962, 452]
 
         feat = self.encoder(x_flat)
         for gnn in self.gnn_layers:

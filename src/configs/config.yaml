@@ -12,19 +12,19 @@ paths:
 mesh:
   name: "icosahedral_m6"
   num_nodes: 40962
-  num_levels: 32
   samples: 100
 
 model:
-  hidden_dim: 256              # Increase hidden capacity from 128 -> 256
-  num_layers: 6                # Increase message-passing depth from 4 -> 6
+  hidden_dim: 512
+  num_layers: 16
+  num_levels: 32
   # Terrain-Following 4D Trajectory Architecture Parameters
   in_vars: 14          # Dynamic input channels (7 vars x 2 timesteps: X_-6h, X_0)
   out_vars: 7          # Output channels predicted (ln_t, u, v, w, q, ln_rho, ln_p for X_+6h)
   num_static_feats: 4  # Static node features account for [elevation, land_sea_mask, cos_sza]
 
 training:
-  epochs: 10
+  epochs: 15
   batch_size: 1        # Batch size per GPU (lowered to fit memory)
   accum_steps: 8       # Gradient accumulation steps (Effective batch size = 16)
   lr: 0.0003                   # Base Learning Rate
@@ -54,7 +54,7 @@ loss_weights:
   # Differentiable Multi-Sensor Satellite Radiance Loss Weights (9 Instruments)
   w_rad_amsua: 0.05    # AMSU-A Temperature Sounder
   w_rad_iasi: 0.05     # IASI Hyperspectral Sounder
-  w_rad_hms: 0.00      # HMS Surface/Atmospheric Microwave Sounder
+  w_rad_hms: 0.05      # HMS Surface/Atmospheric Microwave Sounder
   w_rad_atms: 0.0     # ATMS Advanced Microwave Sounder
   w_rad_cris: 0.0     # CrIS Cross-track Infrared Sounder
   w_rad_seviri: 0.0   # SEVIRI Geostationary Sounder

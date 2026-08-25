@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=aida_training
+#SBATCH --job-name=svw_training
 #SBATCH --account=epic
 #SBATCH --gres=gpu:h100:1
 #SBATCH --mem=128G
