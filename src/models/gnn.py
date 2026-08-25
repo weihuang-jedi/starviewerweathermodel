@@ -105,44 +105,41 @@ class IcosahedralGNNSurrogate(nn.Module):
         edge_index: torch.Tensor,
         static_topo: torch.Tensor = None
     ) -> torch.Tensor:
-        """
-        Args:
-            x_dynamic: Dynamic trajectory [Batch, 14, 32, Nodes]
-                       Channels 0..6: X_-6h | Channels 7..13: X_0
-            edge_index: Edge graph topology [2, Num_Edges]
-            static_topo: Surface features [Batch, Static_Feats (3 or 4), Nodes]
-        """
-        x_dynamic = torch.nan_to_num(x_dynamic, nan=0.0, posinf=10.0, neginf=-10.0)
-        if static_topo is not None:
-            static_topo = torch.nan_to_num(static_topo, nan=0.0, posinf=1.0, neginf=0.0)
-
+        x_dynamic = torch.nan_to_num(x_dynamic, nan=0.0, posinf=3.0, neginf=-3.0)
         batch_size, num_vars, num_levels, num_nodes = x_dynamic.shape
 
-        # 1. Extract X_-6h and X_0 states from input trajectory
-        x_m6 = x_dynamic[:, 0:7, :, :]
-        x_0  = x_dynamic[:, 7:14, :, :]
+        x_0 = x_dynamic[:, 7:14, :, :]
 
-        # 2. Compute Linear Trend Baseline Extrapolation: X_trend = X_0 + (X_0 - X_m6)
-        x_trend = x_0 + (x_0 - x_m6)
-
-        # 3. Predict GNN Variational Delta Correction (delta_X_GNN)
         x_flat = x_dynamic.view(batch_size, num_vars * num_levels, num_nodes)
 
         if static_topo is not None:
             if static_topo.dim() == 2:
                 static_topo = static_topo.unsqueeze(0).expand(batch_size, -1, -1)
+            static_topo = torch.nan_to_num(static_topo, nan=0.0, posinf=1.0, neginf=0.0)
             x_flat = torch.cat([x_flat, static_topo], dim=1)
 
-        x_flat = x_flat.permute(0, 2, 1)  # [Batch, Nodes, Channels] -> [1, 40962, 452]
+        x_flat = x_flat.permute(0, 2, 1)
 
         feat = self.encoder(x_flat)
         for gnn in self.gnn_layers:
             feat = gnn(feat, edge_index)
 
-        delta_gnn_flat = self.decoder(feat)  # [Batch, Nodes, Out_Vars * Levels]
+        delta_gnn_flat = self.decoder(feat)
         delta_gnn = delta_gnn_flat.permute(0, 2, 1).view(batch_size, self.out_vars, self.num_levels, num_nodes)
 
-        # 4. Final Output: X_pred = X_trend + delta_X_GNN
-        x_pred = x_trend + delta_gnn
+        # Scale down residual corrections so tendency updates don't saturate
+        delta_gnn = torch.clamp(delta_gnn, min=-0.05, max=0.05)
 
-        return torch.nan_to_num(x_pred, nan=0.0, posinf=15.0, neginf=-15.0)
+        x_pred = x_0 + delta_gnn
+
+        # Realistic log-space bounds (T in log(K), P in log(Pa))
+        x_pred[:, 0, :, :] = torch.clamp(x_pred[:, 0, :, :], min=5.10, max=5.85)   # T: ~164K to 347K
+        x_pred[:, 1, :, :] = torch.clamp(x_pred[:, 1, :, :], min=-100.0, max=100.0)  # U wind
+        x_pred[:, 2, :, :] = torch.clamp(x_pred[:, 2, :, :], min=-100.0, max=100.0)  # V wind
+        x_pred[:, 3, :, :] = torch.clamp(x_pred[:, 3, :, :], min=-10.0, max=10.0)    # W wind
+        x_pred[:, 4, :, :] = torch.clamp(x_pred[:, 4, :, :], min=0.0, max=0.035)     # q
+        x_pred[:, 5, :, :] = torch.clamp(x_pred[:, 5, :, :], min=-10.0, max=1.0)    # ln(rho)
+        x_pred[:, 6, :, :] = torch.clamp(x_pred[:, 6, :, :], min=4.60, max=11.60)   # ln(P): ~100 Pa to 109 kPa
+
+        # DO NOT use nan_to_num with fixed scalar like 5.5, which overwrites fields with constants
+        return torch.where(torch.isnan(x_pred), x_0, x_pred)

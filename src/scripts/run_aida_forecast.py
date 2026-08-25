@@ -326,14 +326,21 @@ def run_autoregressive_forecast(
                 input_traj = torch.cat([state_prev[:, :7, :, :], state_curr[:, :7, :, :]], dim=1)
 
             # 3. Forward pass through surrogate model
+            # Forward pass through model (returns complete predicted log-state)
             state_next = model(input_traj, edge_index, static_topo=static_topo_4ch)
 
-            # 4. Physical guard bounds
-            state_next[:, 0, :, :] = torch.clamp(state_next[:, 0, :, :], min=4.80, max=6.00)     # T: ~120K to ~400K
-            state_next[:, 1, :, :] = torch.clamp(state_next[:, 1, :, :], min=-120.0, max=120.0) # U wind
-            state_next[:, 2, :, :] = torch.clamp(state_next[:, 2, :, :], min=-120.0, max=120.0) # V wind
-            state_next[:, 4, :, :] = torch.clamp(state_next[:, 4, :, :], min=0.0, max=0.050)    # q
-            state_next[:, 6, :, :] = torch.clamp(state_next[:, 6, :, :], min=3.00, max=12.00)   # p
+            # -----------------------------------------------------------------
+            # CORRECTED LOG-SPACE PHYSICAL BOUNDS:
+            # ln(T): 5.19 (180K) to 5.80 (330K)
+            # ln(P): 0.00 (1 Pa)   to 11.60 (110,000 Pa)
+            # -----------------------------------------------------------------
+            state_next[:, 0, :, :] = torch.clamp(state_next[:, 0, :, :], min=5.1929, max=5.7990)   # T (ln(K))
+            state_next[:, 1, :, :] = torch.clamp(state_next[:, 1, :, :], min=-100.0, max=100.0)  # U wind (m/s)
+            state_next[:, 2, :, :] = torch.clamp(state_next[:, 2, :, :], min=-100.0, max=100.0)  # V wind (m/s)
+            state_next[:, 3, :, :] = torch.clamp(state_next[:, 3, :, :], min=-10.0, max=10.0)    # W wind (Pa/s)
+            state_next[:, 4, :, :] = torch.clamp(state_next[:, 4, :, :], min=0.0, max=0.035)     # q (kg/kg)
+            state_next[:, 5, :, :] = torch.clamp(state_next[:, 5, :, :], min=-10.0, max=1.0)    # ln(rho)
+            state_next[:, 6, :, :] = torch.clamp(state_next[:, 6, :, :], min=0.0, max=11.60)     # ln(p)
 
             next_np = state_next.cpu().numpy().squeeze(0)
 
