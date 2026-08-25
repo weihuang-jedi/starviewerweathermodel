@@ -1,12 +1,13 @@
 #!/bin/bash
 #SBATCH --job-name=aida_forecast
 #SBATCH --account=epic
-#SBATCH --gres=gpu:h100:1
+##SBATCH --gres=gpu:h100:1
+##SBATCH --qos=gpuwf
+##SBATCH --partition=u1-h100
+#SBATCH --partition=u1-compute
 #SBATCH --mem=128G
 #SBATCH --nodes=1
-#SBATCH --partition=u1-h100
-#SBATCH --qos=gpuwf
-#SBATCH --time=00:45:00
+#SBATCH --time=03:45:00
 #SBATCH --output=log.forecast_%J.out
 #SBATCH --export=NONE
 
@@ -33,7 +34,7 @@ time \
 python scripts/run_aida_forecast.py \
   -e ../graph/graph-grid/icosahedral_edge_index_m6.pt \
   -k ${gnn_chpt} \
-  -s 4 \
+  -s 20 \
   -m ../data/icosahedral-truth/icosahedral_logstate_m6.20260101.t00z.0p25.f000.nc \
   -z ../data/icosahedral-truth/icosahedral_logstate_m6.20260101.t06z.0p25.f000.nc \
   -o output/aida.20260101.t12z.0p25.f{lead:03d}.nc
