@@ -34,7 +34,8 @@ training:
   save_interval: 1
   log_batch_freq: 10
   # resume_checkpoint: "checkpoints/aida_gnn.pt"
-  resume_checkpoint: "checkpoints/aida_gnn_epoch_006.pt"
+  # resume_checkpoint: "checkpoints/aida_gnn_epoch_006.pt"
+  resume_checkpoint: "saved_checkpoints/aida_gnn_conv_amsu_iasi_hms.pt"
 
 loss_weights:
   # Base Reconstruction & Physical Regularization

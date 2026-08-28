@@ -7,7 +7,7 @@ Executes diagnostic verification across all atmospheric variables (T, P, U, V, W
 2. Generates Line Growth Curves (RMSE, BIAS, ACC) vs. Lead Time specifically for Levels 5, 15, and 25.
 
 Usage:
-  python utils/plot_forecast_leadtime_series.py --fcst_dir output --truth_dir ../data/icosahedral-truth
+  python utils/plot_forecast_leadtime_series.py --fcst_dir output/20260101/t12z --truth_dir ../data/icosahedral-truth --out_dir plots_leadtime
 """
 
 import argparse
@@ -156,6 +156,7 @@ def generate_heatmap_metrics(
     heatmap_png = os.path.join(out_dir, f"heatmap_{var_name}.png")
     plt.tight_layout(rect=[0, 0, 1, 0.95])
     plt.savefig(heatmap_png, dpi=250, bbox_inches='tight')
+    plt.show()
     plt.close()
     print(f"  ├─ Saved 2D Heatmap: '{heatmap_png}'")
 
@@ -228,25 +229,57 @@ def generate_level_curves(
 
 
 def resolve_file_pairs(fcst_dir: str, truth_dir: str) -> tuple[list[str], list[str], list[int]]:
-    """Automatically pairs forecast files with dynamically time-matched ground truth files."""
-    pattern = os.path.join(fcst_dir, "aida.*.f*.nc")
-    found_fcst = sorted(glob.glob(pattern))
+    """
+    Pairs forecast files with ground truth files.
+    Supports directory structures like:
+    - output/20260101/t12z/fcst.0p25.f024.nc
+    - output/aida.20260101.t12z.0p25.f024.nc
+    """
+    pattern = os.path.join(fcst_dir, "**", "*.nc")
+    found_fcst = sorted(glob.glob(pattern, recursive=True))
 
     if not found_fcst:
-        raise FileNotFoundError(f"[ERROR] No forecast files matching 'aida.*.f*.nc' found in '{fcst_dir}'")
+        pattern_flat = os.path.join(fcst_dir, "*.nc")
+        found_fcst = sorted(glob.glob(pattern_flat))
+
+    if not found_fcst:
+        raise FileNotFoundError(f"[ERROR] No NetCDF forecast files found in '{fcst_dir}'")
 
     fcst_files, truth_files, leads = [], [], []
 
     for f_path in found_fcst:
         base_name = os.path.basename(f_path)
-        match = re.search(r'aida\.(\d{8}\.t\d{2}z)\.0p25\.f(\d{3})\.nc', base_name)
-        if not match:
+        
+        # Regex Option A: Legacy filename containing date and cycle (e.g. aida.20260101.t12z.0p25.f024.nc)
+        match_legacy = re.search(r'(\d{8})\.t(\d{2})z.*?f(\d{3})\.nc', base_name)
+        
+        # Regex Option B: Subdirectory structure (e.g. .../20260101/t12z/fcst.0p25.f024.nc)
+        match_sub = re.search(r'fcst.*?f(\d{3})\.nc', base_name)
+        
+        date_str = None
+        cycle_str = None
+        lead_hr = None
+
+        if match_legacy:
+            date_str = match_legacy.group(1)
+            cycle_str = match_legacy.group(2)
+            lead_hr = int(match_legacy.group(3))
+        elif match_sub:
+            lead_hr = int(match_sub.group(1))
+            
+            # Extract date and cycle from parent path components
+            dir_parts = os.path.normpath(f_path).split(os.sep)
+            for part in dir_parts:
+                if re.match(r'^\d{8}$', part):
+                    date_str = part
+                elif re.match(r'^t\d{2}z$', part):
+                    cycle_str = part.replace('t', '').replace('z', '')
+
+        if date_str is None or cycle_str is None or lead_hr is None:
             continue
 
-        date_tag = match.group(1)
-        lead_hr = int(match.group(2))
-
-        dt_base = datetime.strptime(date_tag, "%Y%m%d.t%Hz")
+        # Compute ground truth file target timestamp
+        dt_base = datetime.strptime(f"{date_str}{cycle_str}", "%Y%m%d%H")
         dt_truth = dt_base + timedelta(hours=lead_hr)
 
         truth_tag = dt_truth.strftime("%Y%m%d.t%Hz")
@@ -256,6 +289,14 @@ def resolve_file_pairs(fcst_dir: str, truth_dir: str) -> tuple[list[str], list[s
             fcst_files.append(f_path)
             truth_files.append(truth_file)
             leads.append(lead_hr)
+        else:
+            print(f"[WARNING] Truth file not found for forecast '{base_name}': expected '{truth_file}'")
+
+    # Sort files by lead time
+    if fcst_files:
+        sorted_pairs = sorted(zip(leads, fcst_files, truth_files), key=lambda x: x[0])
+        leads, fcst_files, truth_files = zip(*sorted_pairs)
+        leads, fcst_files, truth_files = list(leads), list(fcst_files), list(truth_files)
 
     return fcst_files, truth_files, leads
 
@@ -271,7 +312,7 @@ def main():
     fcst_files, truth_files, leads = resolve_file_pairs(args.fcst_dir, args.truth_dir)
 
     if not fcst_files:
-        raise RuntimeError("[ERROR] No valid forecast-truth file pairs resolved!")
+        raise RuntimeError(f"[ERROR] No valid forecast-truth file pairs resolved from fcst_dir='{args.fcst_dir}' and truth_dir='{args.truth_dir}'")
 
     os.makedirs(args.out_dir, exist_ok=True)
 
@@ -289,9 +330,11 @@ def main():
 
     print(f"\n" + "=" * 80)
     print(f" BATCH DIAGNOSTIC EVALUATION ACROSS ALL VARIABLES")
-    print(f" Lead Times Analyzed: {leads} (Hours)")
-    print(f" Target Levels      : {target_levels} (1=Surface, 32=Top)")
-    print(f" Output Directory   : '{args.out_dir}'")
+    print(f" Forecast Files Directory : '{args.fcst_dir}'")
+    print(f" Ground Truth Directory   : '{args.truth_dir}'")
+    print(f" Resolved Lead Times      : {leads} (Hours)")
+    print(f" Target Level Curves      : {target_levels} (1=Surface, 32=Top)")
+    print(f" Output Plots Directory   : '{args.out_dir}'")
     print("=" * 80 + "\n")
 
     for var_name, unit_str in variables_dict.items():
