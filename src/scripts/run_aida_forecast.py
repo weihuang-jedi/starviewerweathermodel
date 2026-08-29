@@ -5,6 +5,7 @@ scripts/run_aida_forecast.py
 Autoregressive Forecast Rollout Engine using trained 4D Terrain-Following AIDA Checkpoint.
 Infers X_+6h, X_+12h, X_+18h... from initial analysis state pair (X_-6h, X_0)
 while conditioning on static topography, 3D terrain heights, and cos(SZA) solar forcing.
+Supports 3D directional message passing via horizontal and vertical edge indices.
 """
 
 import argparse
@@ -20,7 +21,7 @@ import xarray as xr
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from models.gnn import IcosahedralGNNSurrogate
-from models.graph import generate_or_load_edge_index
+from models.graph import generate_or_load_edge_index, generate_vertical_edge_index
 
 
 def compute_solar_zenith_angle(
@@ -272,7 +273,10 @@ def run_autoregressive_forecast(
 
     date_tag, base_year, base_month, base_day, base_hour_utc = parse_date_tag(x_zero_file)
     num_nodes = x_0_np.shape[2]
+
+    # Setup horizontal mesh edges and vertical level column edges
     edge_index = generate_or_load_edge_index(num_nodes=num_nodes, edge_file=edge_index_path).to(device)
+    edge_index_vert = generate_vertical_edge_index(num_nodes=num_nodes, num_levels=num_levels).to(device)
 
     state_prev = torch.from_numpy(x_m6_np).unsqueeze(0).to(device)
     state_curr = torch.from_numpy(x_0_np).unsqueeze(0).to(device)
@@ -325,9 +329,8 @@ def run_autoregressive_forecast(
             else:
                 input_traj = torch.cat([state_prev[:, :7, :, :], state_curr[:, :7, :, :]], dim=1)
 
-            # 3. Forward pass through surrogate model
-            # Forward pass through model (returns complete predicted log-state)
-            state_next = model(input_traj, edge_index, static_topo=static_topo_4ch)
+            # 3. Forward pass through 3D Directional GNN Surrogate Model
+            state_next = model(input_traj, edge_index, edge_index_vert=edge_index_vert, static_topo=static_topo_4ch)
 
             # -----------------------------------------------------------------
             # CORRECTED LOG-SPACE PHYSICAL BOUNDS:

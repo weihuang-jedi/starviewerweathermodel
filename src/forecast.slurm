@@ -25,7 +25,27 @@ if [ -f checkpoints/aida_gnn_surrogate_logstate.pt ]; then
 fi
 
 #gnn_chpt=checkpoints/aida_gnn_epoch_003.pt
-gnn_chpt=checkpoints/aida_gnn.pt
+#gnn_chpt=checkpoints/aida_gnn.pt
+gnn_chpt=saved_checkpoints/aida_gnn+vert_conv_amsu_iasi_hms.pt
+
+fcst_date=20260101
+fcst_hour=12
+
+# Add UTC to prevent timezone offset interference
+base="${fcst_date:0:4}-${fcst_date:4:2}-${fcst_date:6:2} ${fcst_hour}:00 UTC"
+
+# Subtract 6 hours
+m06h_date=$(date -u -d "$base - 12 hours" "+%Y%m%d")
+m06h_hour=$(date -u -d "$base - 12 hours" "+%H")
+
+# Add 6 hours
+zero_date=$(date -u -d "$base - 6 hours" "+%Y%m%d")
+zero_hour=$(date -u -d "$base - 6 hours" "+%H")
+
+output_dir="output/${fcst_date}/t${fcst_hour}z"
+truth_dir="../data/icosahedral-truth"
+m06h_file="${truth_dir}/icosahedral_logstate_m6.${m06h_date}.t${m06h_hour}z.0p25.f000.nc"
+zero_file="${truth_dir}/icosahedral_logstate_m6.${zero_date}.t${zero_hour}z.0p25.f000.nc"
 
 set -x
 
@@ -35,7 +55,7 @@ python scripts/run_aida_forecast.py \
   -e ../graph/graph-grid/icosahedral_edge_index_m6.pt \
   -k ${gnn_chpt} \
   -s 20 \
-  -m ../data/icosahedral-truth/icosahedral_logstate_m6.20260101.t00z.0p25.f000.nc \
-  -z ../data/icosahedral-truth/icosahedral_logstate_m6.20260101.t06z.0p25.f000.nc \
-  -o output/aida.20260101.t12z.0p25.f{lead:03d}.nc
+  -m ${m06h_file} \
+  -z ${zero_file} \
+  -o ${output_dir}/fcst.0p25.f{lead:03d}.nc
 

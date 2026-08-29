@@ -2,7 +2,7 @@
 
 set -x
 
-yyyymmdd=20260701
+yyyymmdd=20260101
 fcsthour=12
 
 python utils/plot_forecast_leadtime_series.py \

@@ -2,7 +2,8 @@
 
 from .dataset import LogStateZarrDataset, LogState4DForecastDataset, SyntheticAIDAStateDataset
 from .gnn import IcosahedralGNNSurrogate
-from .loss import AIDASurrogateLoss, generate_or_load_edge_index
+from .loss import AIDASurrogateLoss
+from .graph import generate_or_load_edge_index, generate_vertical_edge_index
 from .loss import M4MeshOperators, build_icosahedral_differential_operators
 from .amsua import DifferentiableAMSUAOperator
 from .iasi import DifferentiableIASIOperator
@@ -21,6 +22,7 @@ __all__ = [
     "IcosahedralGNNSurrogate",
     "AIDASurrogateLoss",
     "generate_or_load_edge_index",
+    "generate_vertical_edge_index",
     "M4MeshOperators",
     "build_icosahedral_differential_operators",
     "DifferentiableAMSUAOperator",

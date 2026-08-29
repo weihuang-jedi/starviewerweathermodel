@@ -5,7 +5,7 @@ scripts/train_aida_surrogate.py
 AIDA GNN Surrogate Model Training Script for Icosahedral Atmospheric Grids.
 Supports terrain-following 3D height coordinates, static topography conditioning,
 4D observation-guided forecast dataset ingestion, conditional satellite operator execution,
-and verbose, real-time stdout progress flushing.
+3D directional message passing (horizontal + vertical edges), and verbose stdout progress flushing.
 """
 
 import argparse
@@ -25,6 +25,7 @@ from models import (
     LogState4DForecastDataset,
     SyntheticAIDAStateDataset,
     generate_or_load_edge_index,
+    generate_vertical_edge_index,
     IcosahedralGNNSurrogate,
     AIDASurrogateLoss,
     M4MeshOperators,
@@ -67,7 +68,7 @@ def save_checkpoint(filepath: str, model, optimizer, epoch: int, cfg: dict, crit
 
 def train_epoch(
     epoch: int, total_epochs: int, model, dataloader, optimizer, criterion, device,
-    edge_index, graph_mesh_ops, amsua_op, amsua_obs_err, iasi_op, iasi_obs_err,
+    edge_index, edge_index_vert, graph_mesh_ops, amsua_op, amsua_obs_err, iasi_op, iasi_obs_err,
     hms_op, hms_obs_err, atms_op, atms_obs_err, cris_op, cris_obs_err,
     seviri_op, seviri_obs_err, gsrasr_op, gsrasr_obs_err, gsrcsr_op, gsrcsr_obs_err,
     ahicsr_op, ahicsr_obs_err, loss_cfg, accum_steps: int = 4, log_batch_freq: int = 50
@@ -140,8 +141,8 @@ def train_epoch(
         if static_topo is not None:
             static_topo = torch.nan_to_num(static_topo, nan=0.0, posinf=1.0, neginf=0.0)
 
-        # GNN Forward Pass
-        pred = model(x_batch, edge_index, static_topo=static_topo)
+        # GNN Forward Pass with 3D Horizontal & Vertical Edges
+        pred = model(x_batch, edge_index, edge_index_vert=edge_index_vert, static_topo=static_topo)
         pred = torch.nan_to_num(pred, nan=0.0, posinf=10.0, neginf=-10.0)
 
         # 1. Base Physical State Reconstruction Loss
@@ -316,10 +317,17 @@ def train_model(cfg: dict):
     dataloader = DataLoader(dataset, batch_size=train_cfg["batch_size"], shuffle=True)
     print(f"[TRAIN] DataLoader created with {len(dataloader)} total batches.", flush=True)
 
-    print("[GRAPH] Setting up mesh connectivity edge index...", flush=True)
+    num_levels = mesh_cfg.get("num_levels", 32)
+
+    print("[GRAPH] Setting up mesh connectivity edge indices (Horizontal & Vertical)...", flush=True)
     edge_index = generate_or_load_edge_index(
         num_nodes=num_nodes,
         edge_file=paths["edges_path"]
+    ).to(device)
+
+    edge_index_vert = generate_vertical_edge_index(
+        num_nodes=num_nodes,
+        num_levels=num_levels
     ).to(device)
 
     print("[GRAPH] Pre-computing M4 mesh sparse differential operators (Grad/Div)...", flush=True)
@@ -334,7 +342,6 @@ def train_model(cfg: dict):
         lat_deg=lat_deg
     ).to(device)
 
-    num_levels = mesh_cfg.get("num_levels", 32)
     in_vars = model_cfg.get("in_vars", 14)
     out_vars = model_cfg.get("out_vars", 7)
     num_static_feats = model_cfg.get("num_static_feats", 2)
@@ -436,6 +443,7 @@ def train_model(cfg: dict):
             criterion=criterion,
             device=device,
             edge_index=edge_index,
+            edge_index_vert=edge_index_vert,
             graph_mesh_ops=graph_mesh_ops,
             amsua_op=amsua_op, amsua_obs_err=amsua_obs_err,
             iasi_op=iasi_op, iasi_obs_err=iasi_obs_err,

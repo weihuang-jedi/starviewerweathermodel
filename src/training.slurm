@@ -23,6 +23,8 @@ if [ -f checkpoints/aida_gnn_surrogate_logstate.pt ]; then
    mv checkpoints/aida_gnn_surrogate_logstate.pt checkpoints/aida_gnn_surrogate_logstate_${n}.pt
 fi
 
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
 set -x
 
 # 1. Train surrogate

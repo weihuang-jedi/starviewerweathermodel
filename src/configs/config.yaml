@@ -15,8 +15,8 @@ mesh:
   samples: 100
 
 model:
-  hidden_dim: 512
-  num_layers: 16
+  hidden_dim: 256
+  num_layers: 8
   num_levels: 32
   # Terrain-Following 4D Trajectory Architecture Parameters
   in_vars: 14          # Dynamic input channels (7 vars x 2 timesteps: X_-6h, X_0)
@@ -35,7 +35,8 @@ training:
   log_batch_freq: 10
   # resume_checkpoint: "checkpoints/aida_gnn.pt"
   # resume_checkpoint: "checkpoints/aida_gnn_epoch_006.pt"
-  resume_checkpoint: "saved_checkpoints/aida_gnn_conv_amsu_iasi_hms.pt"
+  # resume_checkpoint: "saved_checkpoints/aida_gnn_conv_amsu_iasi_hms.pt"
+  resume_checkpoint: null
 
 loss_weights:
   # Base Reconstruction & Physical Regularization
