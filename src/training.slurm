@@ -24,6 +24,7 @@ if [ -f checkpoints/aida_gnn_surrogate_logstate.pt ]; then
 fi
 
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+#export CUDA_VISIBLE_DEVICES=0
 
 set -x
 

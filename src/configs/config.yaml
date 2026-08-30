@@ -36,11 +36,16 @@ training:
   # resume_checkpoint: "checkpoints/aida_gnn.pt"
   # resume_checkpoint: "checkpoints/aida_gnn_epoch_006.pt"
   # resume_checkpoint: "saved_checkpoints/aida_gnn_conv_amsu_iasi_hms.pt"
-  resume_checkpoint: null
+  # resume_checkpoint: saved_checkpoints/aida_gnn+vert_conv_amsu_iasi_hms.pt
+  resume_checkpoint: saved_checkpoints/aida_gnn_2026Aug30.pt
 
 loss_weights:
   # Base Reconstruction & Physical Regularization
   w_mse: 1.0
+  w_wind_u: 2.5       # Boost U-wind gradient priority
+  w_wind_v: 3.0       # Boost V-wind gradient priority
+  w_wind_ke: 0.15     # Kinetic energy balance
+  w_wind_dir: 0.10    # Cosine direction alignment
   w_conv: 0.05
   lambda_dyn: 0.0001           # Soft dynamics constraint to prevent early gradient explosion
   weight_grad_state: 0.25

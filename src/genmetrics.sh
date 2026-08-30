@@ -4,8 +4,8 @@ set -x
 
 init_date=20260101
 init_hour=12
-# fcst_length=24
-fcst_length=48
+fcst_length=24
+# fcst_length=48
 res="0p25"
 
 # Add UTC to prevent timezone offset interference

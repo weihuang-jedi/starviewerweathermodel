@@ -2,8 +2,8 @@
 """
 models/gnn.py
 -------------
-Icosahedral GNN Surrogate Model Backbone for Atmospheric Data Assimilation and Forecasting.
-Supports 3D Directional Message Passing with Gradient Checkpointing and Out-of-Place Tensor Bounding.
+Icosahedral GNN Model Backbone for Atmospheric Data Assimilation and Forecasting.
+Supports 3D Directional Message Passing with Gradient Checkpointing.
 """
 
 import torch
@@ -26,9 +26,9 @@ class Directional3DConvBlock(nn.Module):
         self.norm = nn.LayerNorm(hidden_dim)
 
     def forward(
-        self, 
-        x: torch.Tensor, 
-        edge_index: torch.Tensor, 
+        self,
+        x: torch.Tensor,
+        edge_index: torch.Tensor,
         edge_index_vert: torch.Tensor = None
     ) -> torch.Tensor:
         batch_size, num_nodes, hidden_dim = x.shape
@@ -36,7 +36,7 @@ class Directional3DConvBlock(nn.Module):
         # 1. Horizontal Message Passing
         src_h, dst_h = edge_index[0], edge_index[1]
         msg_h = self.lin_msg_h(x[:, src_h, :])
-        
+
         agg_msg = torch.zeros_like(x)
         idx_h = dst_h.view(1, -1, 1).expand(batch_size, -1, hidden_dim)
         agg_msg = agg_msg.scatter_add(1, idx_h, msg_h)
@@ -61,11 +61,15 @@ class GraphConvBlock(Directional3DConvBlock):
 
 
 class IcosahedralGNNSurrogate(nn.Module):
+    """
+    Icosahedral GNN AI-Data Assimilation Model.
+    Supports checkpoint loading from 452-channel weights (14 vars * 32 levels + 4 static topo features).
+    """
     def __init__(
         self,
-        in_vars: int = 14,          
-        out_vars: int = 7,          
-        num_static_feats: int = 4,  
+        in_vars: int = 14,
+        out_vars: int = 7,
+        num_static_feats: int = 4,
         hidden_dim: int = 256,
         num_levels: int = 32,
         num_layers: int = 6
@@ -78,10 +82,8 @@ class IcosahedralGNNSurrogate(nn.Module):
         self.num_levels = num_levels
         self.num_layers = num_layers
 
-        if in_vars > 50:
-            total_in_dim = in_vars
-        else:
-            total_in_dim = (in_vars * num_levels) + num_static_feats
+        # Exact total input dimension matching checkpoint [256, 452] -> (14 * 32) + 4 = 452
+        total_in_dim = (in_vars * num_levels) + num_static_feats
 
         self.encoder = nn.Linear(total_in_dim, hidden_dim)
         self.gnn_layers = nn.ModuleList([
@@ -114,20 +116,27 @@ class IcosahedralGNNSurrogate(nn.Module):
         static_topo: torch.Tensor = None
     ) -> torch.Tensor:
         x_dynamic = torch.nan_to_num(x_dynamic, nan=0.0, posinf=3.0, neginf=-3.0)
+
+        # Ensure num_vars is 14 to match the 452 total feature dimension
+        if x_dynamic.shape[1] == 7:
+            x_dynamic = torch.cat([x_dynamic, x_dynamic], dim=1)
+
         batch_size, num_vars, num_levels, num_nodes = x_dynamic.shape
-
-        x_0 = x_dynamic[:, 7:14, :, :]
-
+        x_0 = x_dynamic[:, 7:14, :, :]  # Extract background state
         x_flat = x_dynamic.view(batch_size, num_vars * num_levels, num_nodes)
 
         if static_topo is not None:
             if static_topo.dim() == 2:
                 static_topo = static_topo.unsqueeze(0).expand(batch_size, -1, -1)
             static_topo = torch.nan_to_num(static_topo, nan=0.0, posinf=1.0, neginf=0.0)
+            
+            # Pad or slice static_topo to match 4 channels
+            if static_topo.shape[1] > self.num_static_feats:
+                static_topo = static_topo[:, :self.num_static_feats, :]
+            
             x_flat = torch.cat([x_flat, static_topo], dim=1)
 
-        x_flat = x_flat.permute(0, 2, 1)  # [Batch, Nodes, Channels]
-
+        x_flat = x_flat.permute(0, 2, 1)  # [Batch, Nodes, Channels=452]
         feat = self.encoder(x_flat)       # [Batch, Nodes, Hidden_Dim]
 
         if edge_index_vert is not None:
@@ -156,8 +165,8 @@ class IcosahedralGNNSurrogate(nn.Module):
         delta_gnn = torch.clamp(delta_gnn, min=-0.05, max=0.05)
         x_pred = x_0 + delta_gnn
 
-        # Out-of-place physical bounds
-        c0 = torch.clamp(x_pred[:, 0:1, :, :], min=5.10, max=5.85)   # T
+        # Physical bounds
+        c0 = torch.clamp(x_pred[:, 0:1, :, :], min=5.10, max=5.85)    # T
         c1 = torch.clamp(x_pred[:, 1:2, :, :], min=-100.0, max=100.0)  # U
         c2 = torch.clamp(x_pred[:, 2:3, :, :], min=-100.0, max=100.0)  # V
         c3 = torch.clamp(x_pred[:, 3:4, :, :], min=-10.0, max=10.0)    # W
@@ -166,5 +175,4 @@ class IcosahedralGNNSurrogate(nn.Module):
         c6 = torch.clamp(x_pred[:, 6:7, :, :], min=4.60, max=11.60)   # ln(P)
 
         x_pred_bounded = torch.cat([c0, c1, c2, c3, c4, c5, c6], dim=1)
-
         return torch.where(torch.isnan(x_pred_bounded), x_0, x_pred_bounded)

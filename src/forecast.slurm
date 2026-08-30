@@ -1,10 +1,10 @@
 #!/bin/bash
 #SBATCH --job-name=aida_forecast
 #SBATCH --account=epic
-##SBATCH --gres=gpu:h100:1
-##SBATCH --qos=gpuwf
-##SBATCH --partition=u1-h100
-#SBATCH --partition=u1-compute
+#SBATCH --gres=gpu:h100:1
+#SBATCH --qos=gpuwf
+#SBATCH --partition=u1-h100
+##SBATCH --partition=u1-compute
 #SBATCH --mem=128G
 #SBATCH --nodes=1
 #SBATCH --time=03:45:00
@@ -25,8 +25,10 @@ if [ -f checkpoints/aida_gnn_surrogate_logstate.pt ]; then
 fi
 
 #gnn_chpt=checkpoints/aida_gnn_epoch_003.pt
-#gnn_chpt=checkpoints/aida_gnn.pt
-gnn_chpt=saved_checkpoints/aida_gnn+vert_conv_amsu_iasi_hms.pt
+#gnn_chpt=saved_checkpoints/aida_gnn+vert_conv_amsu_iasi_hms.pt
+#gnn_chpt=checkpoints/aida_gnn_epoch_006.pt
+gnn_chpt=checkpoints/aida_gnn_epoch_012.pt
+#gnn_chpt=saved_checkpoints/aida_gnn_2026Aug30.pt
 
 fcst_date=20260101
 fcst_hour=12

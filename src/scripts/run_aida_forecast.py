@@ -220,43 +220,25 @@ def run_autoregressive_forecast(
 
     print(f"[FORECAST] Loading checkpoint: '{ckpt_path}'", flush=True)
     checkpoint = torch.load(ckpt_path, map_location=device)
-    cfg = checkpoint.get("config", {})
-    model_cfg = cfg.get("model", {})
+    
+    # Read model hyperparams from checkpoint config if available, fallback to 452-channel defaults
+    ckpt_cfg = checkpoint.get("config", {}).get("model", {})
+    in_vars = ckpt_cfg.get("in_vars", 14)
+    out_vars = ckpt_cfg.get("out_vars", 7)
+    num_static_feats = ckpt_cfg.get("num_static_feats", 4)
+    hidden_dim = ckpt_cfg.get("hidden_dim", 256)
+    num_layers = ckpt_cfg.get("num_layers", 6)
+    num_levels = ckpt_cfg.get("num_levels", 32)
 
-    state_dict = checkpoint['model_state_dict']
-    if 'encoder.weight' in state_dict:
-        in_vars = state_dict['encoder.weight'].shape[1]
-    elif 'encoder.0.weight' in state_dict:
-        in_vars = state_dict['encoder.0.weight'].shape[1]
-    else:
-        in_vars = 452
+    model = IcosahedralGNNSurrogate(
+        in_vars=in_vars,
+        out_vars=out_vars,
+        num_static_feats=num_static_feats,
+        hidden_dim=hidden_dim,
+        num_levels=32,
+        num_layers=num_layers
+    ).to(device)
 
-    out_vars = model_cfg.get("out_vars", 7)
-    hidden_dim = model_cfg.get("hidden_dim", 512)
-    num_levels = cfg.get("mesh", {}).get("num_levels", 32)
-    num_layers = model_cfg.get("num_layers", 4)
-
-    init_sig = inspect.signature(IcosahedralGNNSurrogate.__init__).parameters
-
-    kwargs = {}
-    if "in_vars" in init_sig:
-        kwargs["in_vars"] = in_vars
-    elif "in_channels" in init_sig:
-        kwargs["in_channels"] = in_vars
-
-    if "out_vars" in init_sig:
-        kwargs["out_vars"] = out_vars
-    elif "out_channels" in init_sig:
-        kwargs["out_channels"] = out_vars
-
-    if "hidden_dim" in init_sig:
-        kwargs["hidden_dim"] = hidden_dim
-    if "num_levels" in init_sig:
-        kwargs["num_levels"] = num_levels
-    if "num_layers" in init_sig:
-        kwargs["num_layers"] = num_layers
-
-    model = IcosahedralGNNSurrogate(**kwargs).to(device)
     model.load_state_dict(checkpoint['model_state_dict'])
     model.eval()
 
