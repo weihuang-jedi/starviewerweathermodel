@@ -115,7 +115,8 @@ def generate_heatmap_metrics(
     rmse_matrix: np.ndarray,
     bias_matrix: np.ndarray,
     acc_matrix: np.ndarray,
-    out_dir: str
+    out_dir: str,
+    show: bool = False
 ):
     """Generates 2D Vertical Level vs Lead Time Heatmaps for RMSE, BIAS, and ACC."""
     num_levels = rmse_matrix.shape[0]
@@ -156,7 +157,8 @@ def generate_heatmap_metrics(
     heatmap_png = os.path.join(out_dir, f"heatmap_{var_name}.png")
     plt.tight_layout(rect=[0, 0, 1, 0.95])
     plt.savefig(heatmap_png, dpi=250, bbox_inches='tight')
-    plt.show()
+    if show:
+        plt.show()
     plt.close()
     print(f"  ├─ Saved 2D Heatmap: '{heatmap_png}'")
 
@@ -169,7 +171,8 @@ def generate_level_curves(
     bias_matrix: np.ndarray,
     acc_matrix: np.ndarray,
     target_levels: list[int],
-    out_dir: str
+    out_dir: str,
+    show: bool = False
 ):
     """Generates Lead-Time Growth Curves for specific target levels (e.g. L5, L15, L25)."""
     fig, axes = plt.subplots(1, 3, figsize=(20, 5.5))
@@ -224,6 +227,8 @@ def generate_level_curves(
     curves_png = os.path.join(out_dir, f"curves_{var_name}_L5_15_25.png")
     plt.tight_layout(rect=[0, 0, 1, 0.95])
     plt.savefig(curves_png, dpi=250, bbox_inches='tight')
+    if show:
+        plt.show()
     plt.close()
     print(f"  ├─ Saved Level Curves: '{curves_png}'")
 
@@ -306,6 +311,7 @@ def main():
     parser.add_argument("--fcst_dir", default="output", help="Directory containing forecast NetCDF files")
     parser.add_argument("--truth_dir", default="../data/icosahedral-truth", help="Directory containing truth NetCDF files")
     parser.add_argument("--out_dir", default="plots_leadtime", help="Destination directory for output plots")
+    parser.add_argument("-s", "--show", action="store_true", help="Display plot interactively")
 
     args = parser.parse_args()
 
@@ -358,10 +364,10 @@ def main():
             acc_matrix[:, idx] = a
 
         # 1. Plot 2D Level vs. Lead Time Heatmaps
-        generate_heatmap_metrics(var_name, leads, rmse_matrix, bias_matrix, acc_matrix, args.out_dir)
+        generate_heatmap_metrics(var_name, leads, rmse_matrix, bias_matrix, acc_matrix, args.out_dir, args.show)
 
         # 2. Plot RMSE, BIAS, and ACC curves for Levels 5, 15, 25
-        generate_level_curves(var_name, unit_str, leads, rmse_matrix, bias_matrix, acc_matrix, target_levels, args.out_dir)
+        generate_level_curves(var_name, unit_str, leads, rmse_matrix, bias_matrix, acc_matrix, target_levels, args.out_dir, args.show)
 
         print()
 

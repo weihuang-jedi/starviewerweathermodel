@@ -24,7 +24,7 @@ model:
   num_static_feats: 4  # Static node features account for [elevation, land_sea_mask, cos_sza]
 
 training:
-  epochs: 15
+  epochs: 25
   batch_size: 1        # Batch size per GPU (lowered to fit memory)
   accum_steps: 8       # Gradient accumulation steps (Effective batch size = 16)
   lr: 0.0003                   # Base Learning Rate
@@ -34,20 +34,18 @@ training:
   save_interval: 1
   log_batch_freq: 10
   # resume_checkpoint: "checkpoints/aida_gnn.pt"
-  # resume_checkpoint: "checkpoints/aida_gnn_epoch_006.pt"
-  # resume_checkpoint: "saved_checkpoints/aida_gnn_conv_amsu_iasi_hms.pt"
-  # resume_checkpoint: saved_checkpoints/aida_gnn+vert_conv_amsu_iasi_hms.pt
-  resume_checkpoint: saved_checkpoints/aida_gnn_2026Aug30.pt
+  # resume_checkpoint: saved_checkpoints/aida_gnn_epoch_015.pt
+  resume_checkpoint: saved_checkpoints/aida_gnn_2026Aug31_epoch_020.pt
 
 loss_weights:
   # Base Reconstruction & Physical Regularization
   w_mse: 1.0
   w_wind_u: 2.5       # Boost U-wind gradient priority
-  w_wind_v: 3.0       # Boost V-wind gradient priority
-  w_wind_ke: 0.15     # Kinetic energy balance
-  w_wind_dir: 0.10    # Cosine direction alignment
-  w_conv: 0.05
-  lambda_dyn: 0.0001           # Soft dynamics constraint to prevent early gradient explosion
+  w_wind_v: 5.0       # Boost V-wind gradient priority
+  w_wind_ke: 0.25     # Kinetic energy balance
+  w_wind_dir: 0.20    # Cosine direction alignment
+  # lambda_dyn: 0.0001           # Soft dynamics constraint to prevent early gradient explosion
+  lambda_dyn: 0.0002
   weight_grad_state: 0.25
   lambda_p_acc: 0.15
   lambda_asym_p: 0.35
@@ -59,6 +57,8 @@ loss_weights:
   weight_joint_bias: 0.10
   tau_min_p: 0.08
 
+  # Conventional data
+  w_conv: 0.05
   # Differentiable Multi-Sensor Satellite Radiance Loss Weights (9 Instruments)
   w_rad_amsua: 0.05    # AMSU-A Temperature Sounder
   w_rad_iasi: 0.05     # IASI Hyperspectral Sounder
