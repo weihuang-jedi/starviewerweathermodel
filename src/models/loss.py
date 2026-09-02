@@ -7,8 +7,10 @@ Enforces physical consistency using:
   1. Primary State MSE / Normalized Dynamic Field Loss
   2. Specific Kinetic Energy Loss (L_ke)
   3. Wind Vector Cosine Direction Alignment Loss (L_dir)
-  4. M4 Sparse Mesh Spatial Gradient / Laplacian Regularization
-  5. Conventional & Radiance Forward Operator Observation Penalties
+  4. 3D Horizontal Navier-Stokes Momentum Residual Loss (L_momentum) via Sparse Graph Operators
+  5. Non-Hydrostatic Vertical Momentum Equation Residual Loss (L_vert_momentum)
+  6. M4 Sparse Mesh Spatial Gradient / Laplacian Regularization
+  7. Conventional & Radiance Forward Operator Observation Penalties
 """
 
 import torch
@@ -62,7 +64,8 @@ class M4MeshOperators(nn.Module):
 class AIDASurrogateLoss(nn.Module):
     """
     High-Capacity Physics-Informed Multi-Objective Loss Function for AI-DA.
-    Integrates kinetic energy conservation and directional alignment constraints for U/V winds.
+    Integrates kinetic energy conservation, directional wind alignment,
+    3D horizontal momentum residuals, and non-hydrostatic vertical momentum balance.
     """
     def __init__(
         self,
@@ -73,6 +76,7 @@ class AIDASurrogateLoss(nn.Module):
         w_wind_dir: float = 0.10,
         w_laplacian_p: float = 0.01,
         w_dynamics: float = 0.01,
+        w_vert_dynamics: float = 0.01,
         w_joint_bias: float = 0.005,
         u_idx: int = 1,
         v_idx: int = 2,
@@ -87,6 +91,7 @@ class AIDASurrogateLoss(nn.Module):
         self.w_wind_dir = w_wind_dir
         self.w_laplacian_p = w_laplacian_p
         self.w_dynamics = w_dynamics
+        self.w_vert_dynamics = w_vert_dynamics
         self.w_joint_bias = w_joint_bias
 
         self.u_idx = u_idx
@@ -101,11 +106,159 @@ class AIDASurrogateLoss(nn.Module):
         self.register_buffer("mu_ln_rho", torch.tensor(0.20))
         self.register_buffer("std_ln_rho", torch.tensor(0.80))
 
+    def compute_vertical_momentum_residual_loss(
+        self,
+        pred: torch.Tensor,
+        graph_mesh_ops: M4MeshOperators,
+        h_3d: torch.Tensor = None
+    ) -> torch.Tensor:
+        """
+        Computes the Non-Hydrostatic Vertical Momentum Equation Residuals:
+          R_w = (u·∇x)w + (v·∇y)w + (w·∂/∂z)w - (u^2 + v^2)/R_earth + (1/rho)*dP/dz + g - 2*Omega*u*cos(lat)
+
+        Input pred shape: [B, Vars=7, Levels=32, Nodes=40962]
+        """
+        g = 9.80665
+        R_earth = 6371000.0   # Earth's mean radius (m)
+        Omega = 7.292115e-5    # Earth's angular velocity (rad/s)
+
+        B, C, L, N = pred.shape
+
+        # Extract 3D state variables
+        u = pred[:, self.u_idx, :, :]        # Zonal wind (m/s) [B, L, N]
+        v = pred[:, self.v_idx, :, :]        # Meridional wind (m/s) [B, L, N]
+        w = pred[:, 3, :, :]                 # Vertical wind (m/s) [B, L, N]
+        ln_p = pred[:, self.p_idx, :, :]     # Log-pressure ln(P) [B, L, N]
+        ln_rho = pred[:, 5, :, :]            # Log-density ln(rho) [B, L, N]
+
+        # Un-normalize pressure (Pa) and density (kg/m^3)
+        p_pa = torch.exp(ln_p * self.std_ln_p + self.mu_ln_p)
+        rho = torch.exp(ln_rho * self.std_ln_rho + self.mu_ln_rho)
+
+        # ---------------------------------------------------------------------
+        # 1. Physical Pressure Gradient Force: -(1/rho) * (dP/dz)
+        # ---------------------------------------------------------------------
+        if h_3d is not None and h_3d.dim() == 4:
+            dz = torch.diff(h_3d.squeeze(1), dim=1)     # [B, L-1, N]
+            dz = torch.clamp(dz, min=10.0)
+            dz = torch.cat([dz, dz[:, -1:, :]], dim=1)  # Pad top level
+        else:
+            dz = 250.0  # Level thickness fallback
+
+        dp_dz = torch.diff(p_pa, dim=1)
+        dp_dz = torch.cat([dp_dz, dp_dz[:, -1:, :]], dim=1) / dz
+
+        pgf_w = -(1.0 / (rho + 1e-6)) * dp_dz
+
+        # ---------------------------------------------------------------------
+        # 2. Horizontal & Vertical Advection of w using Sparse Mesh Operators
+        # ---------------------------------------------------------------------
+        w_flat = w.permute(2, 0, 1).reshape(N, B * L)
+        dw_dx = torch.sparse.mm(graph_mesh_ops.Gx_sparse, w_flat).reshape(N, B, L).permute(1, 2, 0)
+        dw_dy = torch.sparse.mm(graph_mesh_ops.Gy_sparse, w_flat).reshape(N, B, L).permute(1, 2, 0)
+
+        dw_dz = torch.diff(w, dim=1)
+        dw_dz = torch.cat([dw_dz, dw_dz[:, -1:, :]], dim=1) / dz
+
+        advection_w = (u * dw_dx) + (v * dw_dy) + (w * dw_dz)
+
+        # ---------------------------------------------------------------------
+        # 3. Spherical Curvature Metric Term: -(u^2 + v^2)/R
+        # ---------------------------------------------------------------------
+        metric_centrifugal = -(u**2 + v**2) / R_earth
+
+        # ---------------------------------------------------------------------
+        # 4. Vertical Coriolis Term: +2 * Omega * u * cos(lat)
+        # ---------------------------------------------------------------------
+        cos_lat = torch.cos(graph_mesh_ops.lat_deg * (np.pi / 180.0)).to(pred.device)
+        cos_lat = cos_lat.view(1, 1, N).expand(B, L, N)
+        coriolis_w = 2.0 * Omega * u * cos_lat
+
+        # ---------------------------------------------------------------------
+        # 5. Total Vertical Residual (R_w)
+        # ---------------------------------------------------------------------
+        total_rhs = pgf_w - g + metric_centrifugal + coriolis_w
+        residual_w = advection_w - total_rhs
+
+        # Dimensionless residual scaling by gravity g
+        return torch.mean((residual_w / g) ** 2)
+
+    def compute_momentum_residual_loss(
+        self,
+        pred: torch.Tensor,
+        graph_mesh_ops: M4MeshOperators,
+        edge_index_vert: torch.Tensor = None,
+        h_3d: torch.Tensor = None
+    ) -> torch.Tensor:
+        """
+        Computes 3D Horizontal Navier-Stokes momentum residuals on icosahedral graph grids:
+          R_u = (u·∇_x u + v·∇_y u + w·∂u/∂z) - f*v + R_d * T * ∇_x(ln P)
+          R_v = (u·∇_x v + v·∇_y v + w·∂v/∂z) + f*u + R_d * T * ∇_y(ln P)
+
+        Input pred shape: [B, Vars=7, Levels=32, Nodes=40962]
+        """
+        R_d = 287.05  # Gas constant for dry air (J/(kg*K))
+        B, C, L, N = pred.shape
+
+        u = pred[:, self.u_idx, :, :]     # [B, L, N]
+        v = pred[:, self.v_idx, :, :]     # [B, L, N]
+        w = pred[:, 3, :, :]              # [B, L, N]
+        ln_T = pred[:, 0, :, :]           # [B, L, N]
+        ln_P = pred[:, self.p_idx, :, :]  # [B, L, N]
+
+        t_abs = torch.exp(ln_T * self.std_ln_t + self.mu_ln_t)
+
+        Omega = 7.292115e-5
+        f_coriolis = (2.0 * Omega * torch.sin(graph_mesh_ops.lat_deg * (np.pi / 180.0))).to(pred.device)
+        f_coriolis = f_coriolis.view(1, 1, N).expand(B, L, N)
+
+        u_flat = u.permute(2, 0, 1).reshape(N, B * L)
+        v_flat = v.permute(2, 0, 1).reshape(N, B * L)
+        p_flat = ln_P.permute(2, 0, 1).reshape(N, B * L)
+
+        du_dx = torch.sparse.mm(graph_mesh_ops.Gx_sparse, u_flat).reshape(N, B, L).permute(1, 2, 0)
+        du_dy = torch.sparse.mm(graph_mesh_ops.Gy_sparse, u_flat).reshape(N, B, L).permute(1, 2, 0)
+
+        dv_dx = torch.sparse.mm(graph_mesh_ops.Gx_sparse, v_flat).reshape(N, B, L).permute(1, 2, 0)
+        dv_dy = torch.sparse.mm(graph_mesh_ops.Gy_sparse, v_flat).reshape(N, B, L).permute(1, 2, 0)
+
+        dp_dx = torch.sparse.mm(graph_mesh_ops.Gx_sparse, p_flat).reshape(N, B, L).permute(1, 2, 0)
+        dp_dy = torch.sparse.mm(graph_mesh_ops.Gy_sparse, p_flat).reshape(N, B, L).permute(1, 2, 0)
+
+        if h_3d is not None and h_3d.dim() == 4:
+            dz = torch.diff(h_3d.squeeze(1), dim=1)
+            dz = torch.clamp(dz, min=10.0)
+            dz = torch.cat([dz, dz[:, -1:, :]], dim=1)
+
+            du_dz = torch.diff(u, dim=1)
+            du_dz = torch.cat([du_dz, du_dz[:, -1:, :]], dim=1) / dz
+
+            dv_dz = torch.diff(v, dim=1)
+            dv_dz = torch.cat([dv_dz, dv_dz[:, -1:, :]], dim=1) / dz
+        else:
+            du_dz = torch.diff(u, dim=1)
+            du_dz = torch.cat([du_dz, du_dz[:, -1:, :]], dim=1)
+
+            dv_dz = torch.diff(v, dim=1)
+            dv_dz = torch.cat([dv_dz, dv_dz[:, -1:, :]], dim=1)
+
+        advection_u = (u * du_dx) + (v * du_dy) + (w * du_dz)
+        advection_v = (u * dv_dx) + (v * dv_dy) + (w * dv_dz)
+
+        pgf_u = R_d * t_abs * dp_dx
+        pgf_v = R_d * t_abs * dp_dy
+
+        R_u = advection_u - (f_coriolis * v) + pgf_u
+        R_v = advection_v + (f_coriolis * u) + pgf_v
+
+        return torch.mean(R_u ** 2) + torch.mean(R_v ** 2)
+
     def forward(
         self,
         pred: torch.Tensor,
         target: torch.Tensor,
         edge_index: torch.Tensor,
+        edge_index_vert: torch.Tensor = None,
         graph_mesh_ops: M4MeshOperators = None,
         valid_mask: torch.Tensor = None,
         h_3d: torch.Tensor = None,
@@ -113,7 +266,7 @@ class AIDASurrogateLoss(nn.Module):
     ) -> tuple[torch.Tensor, dict]:
         """
         Computes total loss and itemized metrics breakdown.
-        pred, target: [B, Vars=7, Levels=32, Nodes]
+        pred, target: [B, Vars=7, Levels=32, Nodes=40962]
         """
         metrics = {}
 
@@ -139,7 +292,6 @@ class AIDASurrogateLoss(nn.Module):
         u_pred, v_pred = pred[:, self.u_idx, :, :], pred[:, self.v_idx, :, :]
         u_true, v_true = target[:, self.u_idx, :, :], target[:, self.v_idx, :, :]
 
-        # Specific Kinetic Energy Conservation Loss
         ke_pred = 0.5 * (u_pred**2 + v_pred**2)
         ke_true = 0.5 * (u_true**2 + v_true**2)
         if valid_mask is not None:
@@ -151,7 +303,6 @@ class AIDASurrogateLoss(nn.Module):
         else:
             loss_ke = F.mse_loss(ke_pred, ke_true)
 
-        # Vector Cosine Directional Alignment Loss
         dot_product = u_pred * u_true + v_pred * v_true
         mag_pred = torch.sqrt(u_pred**2 + v_pred**2 + 1e-6)
         mag_true = torch.sqrt(u_true**2 + v_true**2 + 1e-6)
@@ -178,7 +329,6 @@ class AIDASurrogateLoss(nn.Module):
                 p_pred = pred[:, self.p_idx, :, :].float()
                 B, L, N = p_pred.shape
 
-                # Reshape for sparse matrix multiplication
                 p_flat = p_pred.reshape(B * L, N).t()  # [N, B*L]
 
                 grad_x = torch.sparse.mm(graph_mesh_ops.Gx_sparse, p_flat)
@@ -191,6 +341,35 @@ class AIDASurrogateLoss(nn.Module):
                 metrics["loss_laplacian_p"] = loss_laplacian_p.item()
         else:
             metrics["loss_laplacian_p"] = 0.0
+
+        # ---------------------------------------------------------------------
+        # 4. Non-Hydrostatic Vertical Momentum Residual Loss
+        # ---------------------------------------------------------------------
+        if graph_mesh_ops is not None and self.w_vert_dynamics > 0.0:
+            loss_vert_dynamics = self.compute_vertical_momentum_residual_loss(
+                pred=pred,
+                graph_mesh_ops=graph_mesh_ops,
+                h_3d=h_3d
+            )
+            total_loss += (self.w_vert_dynamics * loss_vert_dynamics)
+            metrics["loss_vert_dynamics"] = loss_vert_dynamics.item()
+        else:
+            metrics["loss_vert_dynamics"] = 0.0
+
+        # ---------------------------------------------------------------------
+        # 5. 3D Horizontal Navier-Stokes Momentum Residual Loss
+        # ---------------------------------------------------------------------
+        if graph_mesh_ops is not None and self.w_dynamics > 0.0:
+            loss_momentum = self.compute_momentum_residual_loss(
+                pred=pred,
+                graph_mesh_ops=graph_mesh_ops,
+                edge_index_vert=edge_index_vert,
+                h_3d=h_3d
+            )
+            total_loss += (self.w_dynamics * loss_momentum)
+            metrics["loss_momentum"] = loss_momentum.item()
+        else:
+            metrics["loss_momentum"] = 0.0
 
         metrics["loss_total"] = total_loss.item()
         return total_loss, metrics

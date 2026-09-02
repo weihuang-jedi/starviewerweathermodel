@@ -7,7 +7,7 @@
 ##SBATCH --partition=u1-compute
 #SBATCH --mem=128G
 #SBATCH --nodes=1
-#SBATCH --time=03:45:00
+#SBATCH --time=00:05:00
 #SBATCH --output=log.forecast_%J.out
 #SBATCH --export=NONE
 
@@ -24,11 +24,9 @@ if [ -f checkpoints/aida_gnn.pt ]; then
    mv checkpoints/aida_gnn.pt checkpoints/aida_gnn_${n}.pt
 fi
 
-#gnn_chpt=checkpoints/aida_gnn_epoch_003.pt
 #gnn_chpt=saved_checkpoints/aida_gnn+vert_conv_amsu_iasi_hms.pt
-#gnn_chpt=checkpoints/aida_gnn_epoch_006.pt
 #gnn_chpt=saved_checkpoints/aida_gnn_epoch_015.pt
-gnn_chpt=saved_checkpoints/aida_gnn_epoch_025.pt
+gnn_chpt=checkpoints/aida_gnn_epoch_005.pt
 
 init_date=20260101
 init_hour=12

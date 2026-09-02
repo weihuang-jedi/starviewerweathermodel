@@ -128,22 +128,16 @@ def train_epoch(
         if static_topo is not None:
             static_topo = torch.nan_to_num(static_topo, nan=0.0, posinf=1.0, neginf=0.0)
 
-        # Ensure x_batch has 14 variables to yield (14 * 32) + 4 = 452 input features
-        if x_batch.shape[1] == 7:
-            # If dataset returns 7 vars, concatenate [x_batch, y_batch] or repeat to make 14 vars
-            x_batch_14 = torch.cat([x_batch, y_batch], dim=1)
-        else:
-            x_batch_14 = x_batch
-
         # GNN Forward Pass
-        pred = model(x_batch_14, edge_index, edge_index_vert=edge_index_vert, static_topo=static_topo)
+        pred = model(x_batch, edge_index, edge_index_vert=edge_index_vert, static_topo=static_topo)
         pred = torch.nan_to_num(pred, nan=0.0, posinf=10.0, neginf=-10.0)
 
-        # 1. Base Physical State Reconstruction Loss (MSE + Wind KE + Wind Dir)
+        # 1. Base Physical State Reconstruction + Momentum Residual Loss
         loss, metrics = criterion(
             pred=pred,
             target=y_batch,
             edge_index=edge_index,
+            edge_index_vert=edge_index_vert,  # Passed for 3D Momentum Loss
             graph_mesh_ops=graph_mesh_ops,
             valid_mask=valid_mask,
             h_3d=h_3d,
@@ -207,7 +201,7 @@ def train_epoch(
         total_loss += (w_rad_amsua * loss_rad_amsua)
         metrics["loss_rad_amsua"] = loss_rad_amsua.item()
 
-        # 4. RESTORED & ACTIVE: IASI Radiance Loss Block
+        # 4. IASI Radiance Loss Block
         w_rad_iasi = loss_cfg.get("w_rad_iasi", loss_cfg.get("w_rad", 0.01))
         if w_rad_iasi > 0.0 and obs_iasi_tb is not None:
             tb_sim = torch.nan_to_num(iasi_op(t_k, p_pa, **op_kwargs), nan=240.0)
@@ -262,9 +256,7 @@ def train_epoch(
             print(
                 f"  ├─ [Epoch {epoch:03d}] Batch {batch_idx + 1:04d}/{num_batches:04d} ({pct:5.1f}%) | "
                 f"Total Loss: {metrics['loss_total']:.5e} | State MSE: {metrics.get('loss_mse', 0.0):.5e} | "
-                f"WIND KE: {metrics.get('loss_wind_ke', 0.0):.5e} | WIND DIR: {metrics.get('loss_wind_dir', 0.0):.5e} | "
-                f"AMSU-A: {metrics.get('loss_rad_amsua', 0.0):.5e} | IASI: {metrics.get('loss_rad_iasi', 0.0):.5e} | "
-                f"Speed: {rate:.2f} batch/s",
+                f"MOMENTUM: {metrics.get('loss_momentum', 0.0):.5e} | Speed: {rate:.2f} batch/s",
                 flush=True
             )
             batch_start_time = time.time()
