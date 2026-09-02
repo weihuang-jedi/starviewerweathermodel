@@ -47,14 +47,12 @@ loss_weights:
   w_wind_dir: 0.20    # Cosine direction alignment
   # lambda_dyn: 0.0001           # Soft dynamics constraint to prevent early gradient explosion
   lambda_dyn: 0.0002
-  # =========================================================================
-  # 3D NAVIER-STOKES MOMENTUM RESIDUAL LOSS WEIGHT (w_dynamics)
-  # Controls the physical momentum conservation penalty relative to w_mse.
-  # Recommended range: 0.001 (loose constraint) to 0.05 (strict physical constraint).
-  # Set to 0.0 to disable momentum residual computation entirely.
-  # =========================================================================
-  w_dynamics: 0.005
-  w_vert_dynamics: 0.01  # New Vertical MOMENTUM RESIDUAL LOSS WEIGHT
+  # ---------------------------------------------------------------------------
+  # 3D NAVIER-STOKES & MASS CONTINUITY PHYSICS REGULARIZATION
+  # ---------------------------------------------------------------------------
+  w_dynamics: 0.01       # 3D Horizontal Navier-Stokes momentum residual loss
+  w_vert_dynamics: 0.01  # Non-hydrostatic vertical momentum equation loss
+  w_continuity: 0.01     # Log-State Mass Continuity equation residual loss: d(ln rho)/dt + V.grad(ln rho) + div(V) = 0
   weight_grad_state: 0.25
   lambda_p_acc: 0.15
   lambda_asym_p: 0.35
