@@ -9,7 +9,7 @@ Enforces physical consistency using:
   3. Wind Vector Cosine Direction Alignment Loss (L_dir)
   4. 3D Horizontal Navier-Stokes Momentum Residual Loss (L_momentum) via Sparse Graph Operators
   5. Non-Hydrostatic Vertical Momentum Equation Residual Loss (L_vert_dynamics)
-  6. Log-State Continuity Equation Residual Loss (L_continuity)
+  6. Log-State Mass Continuity Equation Residual Loss (L_continuity)
   7. M4 Sparse Mesh Spatial Gradient / Laplacian Regularization
   8. Conventional & Radiance Forward Operator Observation Penalties
 """
@@ -76,9 +76,9 @@ class AIDASurrogateLoss(nn.Module):
         w_wind_ke: float = 0.15,
         w_wind_dir: float = 0.10,
         w_laplacian_p: float = 0.01,
-        w_dynamics: float = 0.01,
-        w_vert_dynamics: float = 0.01,
-        w_continuity: float = 0.01,
+        w_dynamics: float = 0.001,
+        w_vert_dynamics: float = 0.0001,
+        w_continuity: float = 0.0001,
         w_joint_bias: float = 0.005,
         u_idx: int = 1,
         v_idx: int = 2,
@@ -108,108 +108,6 @@ class AIDASurrogateLoss(nn.Module):
         self.register_buffer("std_ln_p", torch.tensor(1.20))
         self.register_buffer("mu_ln_rho", torch.tensor(0.20))
         self.register_buffer("std_ln_rho", torch.tensor(0.80))
-
-    def compute_continuity_residual_loss(
-        self,
-        pred: torch.Tensor,
-        graph_mesh_ops: M4MeshOperators,
-        h_3d: torch.Tensor = None
-    ) -> torch.Tensor:
-        """
-        Computes the Log-State Mass Continuity Equation Residuals:
-          R_cont = u*d(ln rho)/dx + v*d(ln rho)/dy + w*d(ln rho)/dz + (du/dx + dv/dy + dw/dz)
-
-        Input pred shape: [B, Vars=7, Levels=32, Nodes=40962]
-        """
-        B, C, L, N = pred.shape
-
-        u = pred[:, self.u_idx, :, :]        # Zonal wind (m/s) [B, L, N]
-        v = pred[:, self.v_idx, :, :]        # Meridional wind (m/s) [B, L, N]
-        w = pred[:, 3, :, :]                 # Vertical wind (m/s) [B, L, N]
-        ln_rho = pred[:, 5, :, :]            # Log-density ln(rho) [B, L, N]
-
-        if h_3d is not None and h_3d.dim() == 4:
-            dz = torch.diff(h_3d.squeeze(1), dim=1)
-            dz = torch.clamp(dz, min=10.0)
-            dz = torch.cat([dz, dz[:, -1:, :]], dim=1)
-        else:
-            dz = 250.0
-
-        u_flat = u.permute(2, 0, 1).reshape(N, B * L)
-        v_flat = v.permute(2, 0, 1).reshape(N, B * L)
-        rho_flat = ln_rho.permute(2, 0, 1).reshape(N, B * L)
-
-        drho_dx = torch.sparse.mm(graph_mesh_ops.Gx_sparse, rho_flat).reshape(N, B, L).permute(1, 2, 0)
-        drho_dy = torch.sparse.mm(graph_mesh_ops.Gy_sparse, rho_flat).reshape(N, B, L).permute(1, 2, 0)
-
-        du_dx = torch.sparse.mm(graph_mesh_ops.Gx_sparse, u_flat).reshape(N, B, L).permute(1, 2, 0)
-        dv_dy = torch.sparse.mm(graph_mesh_ops.Gy_sparse, v_flat).reshape(N, B, L).permute(1, 2, 0)
-
-        drho_dz = torch.diff(ln_rho, dim=1)
-        drho_dz = torch.cat([drho_dz, drho_dz[:, -1:, :]], dim=1) / dz
-
-        dw_dz = torch.diff(w, dim=1)
-        dw_dz = torch.cat([dw_dz, dw_dz[:, -1:, :]], dim=1) / dz
-
-        advection_rho = (u * drho_dx) + (v * drho_dy) + (w * drho_dz)
-        div_V = du_dx + dv_dy + dw_dz
-
-        residual_cont = advection_rho + div_V
-        return torch.mean(residual_cont ** 2)
-
-    def compute_vertical_momentum_residual_loss(
-        self,
-        pred: torch.Tensor,
-        graph_mesh_ops: M4MeshOperators,
-        h_3d: torch.Tensor = None
-    ) -> torch.Tensor:
-        """Computes non-hydrostatic vertical momentum residuals."""
-        g = 9.80665
-        R_earth = 6371000.0
-        Omega = 7.292115e-5
-
-        B, C, L, N = pred.shape
-
-        u = pred[:, self.u_idx, :, :]
-        v = pred[:, self.v_idx, :, :]
-        w = pred[:, 3, :, :]
-        ln_p = pred[:, self.p_idx, :, :]
-        ln_rho = pred[:, 5, :, :]
-
-        p_pa = torch.exp(ln_p * self.std_ln_p + self.mu_ln_p)
-        rho = torch.exp(ln_rho * self.std_ln_rho + self.mu_ln_rho)
-
-        if h_3d is not None and h_3d.dim() == 4:
-            dz = torch.diff(h_3d.squeeze(1), dim=1)
-            dz = torch.clamp(dz, min=10.0)
-            dz = torch.cat([dz, dz[:, -1:, :]], dim=1)
-        else:
-            dz = 250.0
-
-        dp_dz = torch.diff(p_pa, dim=1)
-        dp_dz = torch.cat([dp_dz, dp_dz[:, -1:, :]], dim=1) / dz
-
-        pgf_w = -(1.0 / (rho + 1e-6)) * dp_dz
-
-        w_flat = w.permute(2, 0, 1).reshape(N, B * L)
-        dw_dx = torch.sparse.mm(graph_mesh_ops.Gx_sparse, w_flat).reshape(N, B, L).permute(1, 2, 0)
-        dw_dy = torch.sparse.mm(graph_mesh_ops.Gy_sparse, w_flat).reshape(N, B, L).permute(1, 2, 0)
-
-        dw_dz = torch.diff(w, dim=1)
-        dw_dz = torch.cat([dw_dz, dw_dz[:, -1:, :]], dim=1) / dz
-
-        advection_w = (u * dw_dx) + (v * dw_dy) + (w * dw_dz)
-
-        metric_centrifugal = -(u**2 + v**2) / R_earth
-
-        cos_lat = torch.cos(graph_mesh_ops.lat_deg * (np.pi / 180.0)).to(pred.device)
-        cos_lat = cos_lat.view(1, 1, N).expand(B, L, N)
-        coriolis_w = 2.0 * Omega * u * cos_lat
-
-        total_rhs = pgf_w - g + metric_centrifugal + coriolis_w
-        residual_w = advection_w - total_rhs
-
-        return torch.mean((residual_w / g) ** 2)
 
     def compute_momentum_residual_loss(
         self,
@@ -248,7 +146,7 @@ class AIDASurrogateLoss(nn.Module):
         dp_dy = torch.sparse.mm(graph_mesh_ops.Gy_sparse, p_flat).reshape(N, B, L).permute(1, 2, 0)
 
         if h_3d is not None and h_3d.dim() == 4:
-            dz = torch.diff(h_3d.squeeze(1), dim=1)
+            dz = torch.abs(torch.diff(h_3d.squeeze(1), dim=1))
             dz = torch.clamp(dz, min=10.0)
             dz = torch.cat([dz, dz[:, -1:, :]], dim=1)
 
@@ -274,6 +172,121 @@ class AIDASurrogateLoss(nn.Module):
         R_v = advection_v + (f_coriolis * u) + pgf_v
 
         return torch.mean(R_u ** 2) + torch.mean(R_v ** 2)
+
+    def compute_vertical_momentum_residual_loss(
+        self,
+        pred: torch.Tensor,
+        graph_mesh_ops: M4MeshOperators,
+        h_3d: torch.Tensor = None
+    ) -> torch.Tensor:
+        """
+        Computes robust non-dimensionalized vertical momentum residuals using 
+        ideal gas thermodynamic log-pressure PGF scaling: (1/rho)*dP/dz = R_d * T * d(ln P)/dz.
+        """
+        g = 9.80665
+        R_d = 287.05
+        R_earth = 6371000.0
+        Omega = 7.292115e-5
+
+        B, C, L, N = pred.shape
+
+        u = pred[:, self.u_idx, :, :]
+        v = pred[:, self.v_idx, :, :]
+        w = pred[:, 3, :, :]
+        ln_T = pred[:, 0, :, :]
+        ln_P = pred[:, self.p_idx, :, :]
+
+        # Absolute temperature (Kelvin)
+        t_abs = torch.exp(ln_T * self.std_ln_t + self.mu_ln_t)
+
+        # 1. Level thickness dz (m)
+        if h_3d is not None and h_3d.dim() == 4:
+            dz = torch.abs(torch.diff(h_3d.squeeze(1), dim=1))
+            dz = torch.clamp(dz, min=10.0)
+            dz = torch.cat([dz, dz[:, -1:, :]], dim=1)
+        else:
+            dz = 250.0
+
+        # 2. Thermodynamic Vertical Pressure Gradient Acceleration
+        # d(ln P)/dz via physical scale factor
+        dln_P_dz = torch.diff(ln_P * self.std_ln_p + self.mu_ln_p, dim=1)
+        dln_P_dz = torch.cat([dln_P_dz, dln_P_dz[:, -1:, :]], dim=1) / dz
+
+        # PGF Acceleration = - R_d * T * d(ln P)/dz
+        pgf_w = -R_d * t_abs * dln_P_dz
+
+        # Hydrostatic acceleration imbalance relative to g
+        hydrostatic_imbalance = (pgf_w - g) / g
+
+        # 3. Spatial Advection of vertical wind w
+        w_flat = w.permute(2, 0, 1).reshape(N, B * L)
+        dw_dx = torch.sparse.mm(graph_mesh_ops.Gx_sparse, w_flat).reshape(N, B, L).permute(1, 2, 0)
+        dw_dy = torch.sparse.mm(graph_mesh_ops.Gy_sparse, w_flat).reshape(N, B, L).permute(1, 2, 0)
+
+        dw_dz = torch.diff(w, dim=1)
+        dw_dz = torch.cat([dw_dz, dw_dz[:, -1:, :]], dim=1) / dz
+
+        advection_w = ((u * dw_dx) + (v * dw_dy) + (w * dw_dz)) / g
+
+        # 4. Spherical Metric & Coriolis accelerations
+        metric_centrifugal = (-(u**2 + v**2) / R_earth) / g
+
+        cos_lat = torch.cos(graph_mesh_ops.lat_deg * (np.pi / 180.0)).to(pred.device)
+        cos_lat = cos_lat.view(1, 1, N).expand(B, L, N)
+        coriolis_w = (2.0 * Omega * u * cos_lat) / g
+
+        # 5. Combined Non-Dimensional Vertical Residual
+        residual_w = advection_w - hydrostatic_imbalance + metric_centrifugal + coriolis_w
+
+        return torch.mean(residual_w ** 2)
+
+    def compute_continuity_residual_loss(
+        self,
+        pred: torch.Tensor,
+        graph_mesh_ops: M4MeshOperators,
+        h_3d: torch.Tensor = None
+    ) -> torch.Tensor:
+        """
+        Computes non-dimensionalized log-state mass continuity residuals:
+          R_cont = [ V·∇(ln rho) + ∇·V ] / (1e-4 s^-1)
+        """
+        B, C, L, N = pred.shape
+
+        u = pred[:, self.u_idx, :, :]
+        v = pred[:, self.v_idx, :, :]
+        w = pred[:, 3, :, :]
+        ln_rho = pred[:, 5, :, :]
+
+        if h_3d is not None and h_3d.dim() == 4:
+            dz = torch.abs(torch.diff(h_3d.squeeze(1), dim=1))
+            dz = torch.clamp(dz, min=10.0)
+            dz = torch.cat([dz, dz[:, -1:, :]], dim=1)
+        else:
+            dz = 250.0
+
+        u_flat = u.permute(2, 0, 1).reshape(N, B * L)
+        v_flat = v.permute(2, 0, 1).reshape(N, B * L)
+        rho_flat = ln_rho.permute(2, 0, 1).reshape(N, B * L)
+
+        drho_dx = torch.sparse.mm(graph_mesh_ops.Gx_sparse, rho_flat).reshape(N, B, L).permute(1, 2, 0)
+        drho_dy = torch.sparse.mm(graph_mesh_ops.Gy_sparse, rho_flat).reshape(N, B, L).permute(1, 2, 0)
+
+        du_dx = torch.sparse.mm(graph_mesh_ops.Gx_sparse, u_flat).reshape(N, B, L).permute(1, 2, 0)
+        dv_dy = torch.sparse.mm(graph_mesh_ops.Gy_sparse, v_flat).reshape(N, B, L).permute(1, 2, 0)
+
+        drho_dz = torch.diff(ln_rho, dim=1)
+        drho_dz = torch.cat([drho_dz, drho_dz[:, -1:, :]], dim=1) / dz
+
+        dw_dz = torch.diff(w, dim=1)
+        dw_dz = torch.cat([dw_dz, dw_dz[:, -1:, :]], dim=1) / dz
+
+        advection_rho = (u * drho_dx) + (v * drho_dy) + (w * drho_dz)
+        div_V = du_dx + dv_dy + dw_dz
+
+        # Normalize by typical synoptic divergence scale (1e-4 s^-1)
+        residual_cont = (advection_rho + div_V) / 1e-4
+
+        return torch.mean(residual_cont ** 2)
 
     def forward(
         self,

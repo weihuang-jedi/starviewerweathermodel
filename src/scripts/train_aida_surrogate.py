@@ -253,10 +253,15 @@ def train_epoch(
             rate = log_batch_freq / elapsed_batch_time if elapsed_batch_time > 0 else 0.0
             pct = ((batch_idx + 1) / num_batches) * 100.0
 
+            #   f"  ├─ [Epoch {epoch:03d}] Batch {batch_idx + 1:04d}/{num_batches:04d} ({pct:5.1f}%)\n"
             print(
-                f"  ├─ [Epoch {epoch:03d}] Batch {batch_idx + 1:04d}/{num_batches:04d} ({pct:5.1f}%) | "
-                f"Total Loss: {metrics['loss_total']:.5e} | State MSE: {metrics.get('loss_mse', 0.0):.5e} | "
-                f"MOMENTUM: {metrics.get('loss_momentum', 0.0):.5e} | Speed: {rate:.2f} batch/s",
+                f"[Epoch {epoch:03d}] Batch {batch_idx + 1:04d}/{num_batches:04d} ({pct:5.1f}%)\n"
+                f"\tTotal Loss: {metrics['loss_total']:.5e}\n"
+                f"\t\tState MSE: {metrics.get('loss_mse', 0.0):.5e}\n"
+                f"\t\tMOMENTUM: {metrics.get('loss_momentum', 0.0):.5e}\n"
+                f"\t\tVertical MOMENTUM: {metrics.get('loss_vert_dynamics', 0.0):.5e}\n"
+                f"\t\tContinuity: {metrics.get('loss_continuity', 0.0):.5e}\n"
+                f"\t\tSpeed: {rate:.2f} batch/s",
                 flush=True
             )
             batch_start_time = time.time()

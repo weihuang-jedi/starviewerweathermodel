@@ -26,7 +26,7 @@ fi
 
 #gnn_chpt=saved_checkpoints/aida_gnn+vert_conv_amsu_iasi_hms.pt
 #gnn_chpt=saved_checkpoints/aida_gnn_epoch_015.pt
-gnn_chpt=checkpoints/aida_gnn_epoch_005.pt
+gnn_chpt=checkpoints/aida_gnn_epoch_008.pt
 
 init_date=20260101
 init_hour=12

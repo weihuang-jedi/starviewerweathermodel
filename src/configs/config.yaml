@@ -24,7 +24,7 @@ model:
   num_static_feats: 4  # Static node features account for [elevation, land_sea_mask, cos_sza]
 
 training:
-  epochs: 10
+  epochs: 12
   batch_size: 1        # Batch size per GPU (lowered to fit memory)
   accum_steps: 8       # Gradient accumulation steps (Effective batch size = 16)
   lr: 0.0003                   # Base Learning Rate
@@ -36,7 +36,7 @@ training:
   # resume_checkpoint: "checkpoints/aida_gnn.pt"
   # resume_checkpoint: saved_checkpoints/aida_gnn_epoch_015.pt
   # resume_checkpoint: saved_checkpoints/aida_gnn_2026Aug31_epoch_020.pt
-  resume_checkpoint: None
+  resume_checkpoint: checkpoints/aida_gnn_epoch_009.pt
 
 loss_weights:
   # Base Reconstruction & Physical Regularization
@@ -50,9 +50,10 @@ loss_weights:
   # ---------------------------------------------------------------------------
   # 3D NAVIER-STOKES & MASS CONTINUITY PHYSICS REGULARIZATION
   # ---------------------------------------------------------------------------
-  w_dynamics: 0.01       # 3D Horizontal Navier-Stokes momentum residual loss
-  w_vert_dynamics: 0.01  # Non-hydrostatic vertical momentum equation loss
-  w_continuity: 0.01     # Log-State Mass Continuity equation residual loss: d(ln rho)/dt + V.grad(ln rho) + div(V) = 0
+  w_dynamics: 0.002
+  w_vert_dynamics: 0.0002
+  w_continuity: 0.005
+
   weight_grad_state: 0.25
   lambda_p_acc: 0.15
   lambda_asym_p: 0.35
@@ -67,9 +68,9 @@ loss_weights:
   # Conventional data
   w_conv: 0.05
   # Differentiable Multi-Sensor Satellite Radiance Loss Weights (9 Instruments)
-  w_rad_amsua: 0.05    # AMSU-A Temperature Sounder
-  w_rad_iasi: 0.05     # IASI Hyperspectral Sounder
-  w_rad_hms: 0.05      # HMS Surface/Atmospheric Microwave Sounder
+  w_rad_amsua: 0.005    # AMSU-A Temperature Sounder
+  w_rad_iasi: 0.005     # IASI Hyperspectral Sounder
+  w_rad_hms: 0.005      # HMS Surface/Atmospheric Microwave Sounder
   w_rad_atms: 0.0     # ATMS Advanced Microwave Sounder
   w_rad_cris: 0.0     # CrIS Cross-track Infrared Sounder
   w_rad_seviri: 0.0   # SEVIRI Geostationary Sounder

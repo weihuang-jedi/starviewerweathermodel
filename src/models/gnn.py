@@ -1,15 +1,31 @@
 #!/usr/bin/env python3
 """
 models/gnn.py
--------------
+--------------
 Icosahedral GNN Model Backbone for Atmospheric Data Assimilation and Forecasting.
-Supports 3D Directional Message Passing with Gradient Checkpointing.
+Supports 3D Directional Message Passing with Gradient Checkpointing and
+Degree Normalization for Pentagonal Topological Singularities.
 """
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
+
+
+def compute_node_degree_normalization(edge_index: torch.Tensor, num_nodes: int) -> torch.Tensor:
+    """
+    Computes inverse node degree scaling factors:
+      - Hexagonal Nodes (degree 6) -> 6.0 / 6.0 = 1.00
+      - Pentagonal Nodes (degree 5) -> 5.0 / 6.0 = 0.8333
+    This cancels out the 20% area deficiency on icosahedral vertex singularities.
+    """
+    deg = torch.zeros(num_nodes, dtype=torch.float32, device=edge_index.device)
+    src_nodes = edge_index[0]
+    deg.index_add_(0, src_nodes, torch.ones_like(src_nodes, dtype=torch.float32))
+
+    norm_factor = deg / 6.0  # Pentagons = 5/6, Hexagons = 6/6
+    return torch.clamp(norm_factor, min=0.5, max=1.5)
 
 
 class Directional3DConvBlock(nn.Module):
@@ -29,7 +45,8 @@ class Directional3DConvBlock(nn.Module):
         self,
         x: torch.Tensor,
         edge_index: torch.Tensor,
-        edge_index_vert: torch.Tensor = None
+        edge_index_vert: torch.Tensor = None,
+        degree_norm: torch.Tensor = None
     ) -> torch.Tensor:
         batch_size, num_nodes, hidden_dim = x.shape
 
@@ -40,6 +57,16 @@ class Directional3DConvBlock(nn.Module):
         agg_msg = torch.zeros_like(x)
         idx_h = dst_h.view(1, -1, 1).expand(batch_size, -1, hidden_dim)
         agg_msg = agg_msg.scatter_add(1, idx_h, msg_h)
+
+        # Apply degree normalization (handling 3D level expansion)
+        if degree_norm is not None:
+            if degree_norm.shape[0] != num_nodes and num_nodes % degree_norm.shape[0] == 0:
+                num_levels = num_nodes // degree_norm.shape[0]
+                norm_scale = degree_norm.repeat(num_levels).view(1, num_nodes, 1)
+            else:
+                norm_scale = degree_norm.view(1, num_nodes, 1)
+
+            agg_msg = agg_msg * norm_scale
 
         # 2. Vertical Message Passing
         if edge_index_vert is not None:
@@ -72,7 +99,7 @@ class IcosahedralGNNSurrogate(nn.Module):
         num_static_feats: int = 4,
         hidden_dim: int = 256,
         num_levels: int = 32,
-        num_layers: int = 6
+        num_layers: int = 4
     ):
         super().__init__()
         self.in_vars = in_vars
@@ -82,7 +109,6 @@ class IcosahedralGNNSurrogate(nn.Module):
         self.num_levels = num_levels
         self.num_layers = num_layers
 
-        # Exact total input dimension matching checkpoint [256, 452] -> (14 * 32) + 4 = 452
         total_in_dim = (in_vars * num_levels) + num_static_feats
 
         self.encoder = nn.Linear(total_in_dim, hidden_dim)
@@ -95,6 +121,7 @@ class IcosahedralGNNSurrogate(nn.Module):
             nn.Linear(hidden_dim, out_vars * num_levels)
         )
 
+        self.register_buffer("degree_norm_cache", None, persistent=False)
         self._init_weights()
 
     def _init_weights(self):
@@ -117,7 +144,6 @@ class IcosahedralGNNSurrogate(nn.Module):
     ) -> torch.Tensor:
         x_dynamic = torch.nan_to_num(x_dynamic, nan=0.0, posinf=3.0, neginf=-3.0)
 
-        # Ensure num_vars is 14 to match the 452 total feature dimension
         if x_dynamic.shape[1] == 7:
             x_dynamic = torch.cat([x_dynamic, x_dynamic], dim=1)
 
@@ -125,15 +151,18 @@ class IcosahedralGNNSurrogate(nn.Module):
         x_0 = x_dynamic[:, 7:14, :, :]  # Extract background state
         x_flat = x_dynamic.view(batch_size, num_vars * num_levels, num_nodes)
 
+        # Compute degree normalization vector once per grid size
+        if self.degree_norm_cache is None or self.degree_norm_cache.shape[0] != num_nodes:
+            self.degree_norm_cache = compute_node_degree_normalization(edge_index, num_nodes).to(x_dynamic.device)
+
         if static_topo is not None:
             if static_topo.dim() == 2:
                 static_topo = static_topo.unsqueeze(0).expand(batch_size, -1, -1)
             static_topo = torch.nan_to_num(static_topo, nan=0.0, posinf=1.0, neginf=0.0)
-            
-            # Pad or slice static_topo to match 4 channels
+
             if static_topo.shape[1] > self.num_static_feats:
                 static_topo = static_topo[:, :self.num_static_feats, :]
-            
+
             x_flat = torch.cat([x_flat, static_topo], dim=1)
 
         x_flat = x_flat.permute(0, 2, 1)  # [Batch, Nodes, Channels=452]
@@ -147,17 +176,41 @@ class IcosahedralGNNSurrogate(nn.Module):
 
             for gnn in self.gnn_layers:
                 if self.training:
-                    feat = checkpoint(gnn, feat, edge_index_3d_horiz, edge_index_vert, use_reentrant=False)
+                    feat = checkpoint(
+                        gnn,
+                        feat,
+                        edge_index_3d_horiz,
+                        edge_index_vert,
+                        self.degree_norm_cache,
+                        use_reentrant=False
+                    )
                 else:
-                    feat = gnn(feat, edge_index_3d_horiz, edge_index_vert=edge_index_vert)
+                    feat = gnn(
+                        feat,
+                        edge_index_3d_horiz,
+                        edge_index_vert=edge_index_vert,
+                        degree_norm=self.degree_norm_cache
+                    )
 
             feat = feat.view(batch_size, num_levels, num_nodes, -1).mean(dim=1)
         else:
             for gnn in self.gnn_layers:
                 if self.training:
-                    feat = checkpoint(gnn, feat, edge_index, None, use_reentrant=False)
+                    feat = checkpoint(
+                        gnn,
+                        feat,
+                        edge_index,
+                        None,
+                        self.degree_norm_cache,
+                        use_reentrant=False
+                    )
                 else:
-                    feat = gnn(feat, edge_index, edge_index_vert=None)
+                    feat = gnn(
+                        feat,
+                        edge_index,
+                        edge_index_vert=None,
+                        degree_norm=self.degree_norm_cache
+                    )
 
         delta_gnn_flat = self.decoder(feat)
         delta_gnn = delta_gnn_flat.permute(0, 2, 1).view(batch_size, self.out_vars, self.num_levels, num_nodes)
@@ -166,13 +219,13 @@ class IcosahedralGNNSurrogate(nn.Module):
         x_pred = x_0 + delta_gnn
 
         # Physical bounds
-        c0 = torch.clamp(x_pred[:, 0:1, :, :], min=5.10, max=5.85)    # T
+        c0 = torch.clamp(x_pred[:, 0:1, :, :], min=5.10, max=5.85)     # T
         c1 = torch.clamp(x_pred[:, 1:2, :, :], min=-100.0, max=100.0)  # U
         c2 = torch.clamp(x_pred[:, 2:3, :, :], min=-100.0, max=100.0)  # V
         c3 = torch.clamp(x_pred[:, 3:4, :, :], min=-10.0, max=10.0)    # W
         c4 = torch.clamp(x_pred[:, 4:5, :, :], min=0.0, max=0.035)     # q
-        c5 = torch.clamp(x_pred[:, 5:6, :, :], min=-10.0, max=1.0)    # ln(rho)
-        c6 = torch.clamp(x_pred[:, 6:7, :, :], min=4.60, max=11.60)   # ln(P)
+        c5 = torch.clamp(x_pred[:, 5:6, :, :], min=-2.50, max=1.0)     # ln(rho)
+        c6 = torch.clamp(x_pred[:, 6:7, :, :], min=4.60, max=11.60)    # ln(P)
 
         x_pred_bounded = torch.cat([c0, c1, c2, c3, c4, c5, c6], dim=1)
         return torch.where(torch.isnan(x_pred_bounded), x_0, x_pred_bounded)
