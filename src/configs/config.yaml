@@ -24,7 +24,7 @@ model:
   num_static_feats: 4  # Static node features account for [elevation, land_sea_mask, cos_sza]
 
 training:
-  epochs: 12
+  epochs: 30
   batch_size: 1        # Batch size per GPU (lowered to fit memory)
   accum_steps: 8       # Gradient accumulation steps (Effective batch size = 16)
   lr: 0.0003                   # Base Learning Rate
@@ -36,7 +36,7 @@ training:
   # resume_checkpoint: "checkpoints/aida_gnn.pt"
   # resume_checkpoint: saved_checkpoints/aida_gnn_epoch_015.pt
   # resume_checkpoint: saved_checkpoints/aida_gnn_2026Aug31_epoch_020.pt
-  resume_checkpoint: checkpoints/aida_gnn_epoch_009.pt
+  resume_checkpoint: checkpoints/aida_gnn_epoch_025.pt
 
 loss_weights:
   # Base Reconstruction & Physical Regularization
@@ -50,9 +50,12 @@ loss_weights:
   # ---------------------------------------------------------------------------
   # 3D NAVIER-STOKES & MASS CONTINUITY PHYSICS REGULARIZATION
   # ---------------------------------------------------------------------------
-  w_dynamics: 0.002
-  w_vert_dynamics: 0.0002
-  w_continuity: 0.005
+  w_dynamics: 0.001       # 3D Horizontal Navier-Stokes momentum residual loss
+  w_vert_dynamics: 0.0001 # Non-hydrostatic vertical momentum loss
+  w_continuity: 0.005     # Mass continuity loss
+
+  w_laplacian_p: 0.05       # Pressure spatial smoothness penalty
+  w_pentagon_penalty: 0.10  # Explicit 12-vertex local variance penalty
 
   weight_grad_state: 0.25
   lambda_p_acc: 0.15

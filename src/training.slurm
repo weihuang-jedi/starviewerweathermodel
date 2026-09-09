@@ -6,9 +6,9 @@
 #SBATCH --nodes=1
 #SBATCH --partition=u1-h100
 #SBATCH --qos=gpuwf
-#SBATCH --time=12:00:00
+#SBATCH --time=23:45:00
 #SBATCH --output=log.training_%J.out
-#SBATCH --export=NONE
+#SBATCH --export=ALL
 
 # SVGHOME=/scratch4/NAGAPE/epic/Wei.Huang/src/starviewerweathermodel
 SVGHOME=/scratch5/purged/Wei.Huang/src/starviewerweathermodel

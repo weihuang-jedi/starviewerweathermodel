@@ -10,8 +10,9 @@ Enforces physical consistency using:
   4. 3D Horizontal Navier-Stokes Momentum Residual Loss (L_momentum) via Sparse Graph Operators
   5. Non-Hydrostatic Vertical Momentum Equation Residual Loss (L_vert_dynamics)
   6. Log-State Mass Continuity Equation Residual Loss (L_continuity)
-  7. M4 Sparse Mesh Spatial Gradient / Laplacian Regularization
-  8. Conventional & Radiance Forward Operator Observation Penalties
+  7. Pentagon Vertex Spatial Smoothness Loss (L_pentagon)
+  8. M4 Sparse Mesh Spatial Gradient / Laplacian Regularization
+  9. Conventional & Radiance Forward Operator Observation Penalties
 """
 
 import torch
@@ -21,7 +22,7 @@ import numpy as np
 
 
 def build_icosahedral_differential_operators(lat_deg: torch.Tensor, lon_deg: torch.Tensor, edge_index: torch.Tensor):
-    """Builds sparse CSR gradient operators (Gx, Gy) for icosahedral graph nodes."""
+    """Builds sparse CSR gradient operators (Gx, Gy) for icosahedral graph nodes with dual cell area scaling."""
     N = len(lat_deg)
     src_nodes, dst_nodes = edge_index[0].cpu().numpy(), edge_index[1].cpu().numpy()
 
@@ -40,8 +41,13 @@ def build_icosahedral_differential_operators(lat_deg: torch.Tensor, lon_deg: tor
     dy = R_earth * dlat
 
     dist_sq = dx**2 + dy**2 + 1e-6
-    weights_x = dx / dist_sq
-    weights_y = dy / dist_sq
+
+    # Dual cell area correction: pentagonal nodes (degree 5) have 5/6 the surface area of hexagons
+    deg = np.bincount(dst_nodes, minlength=N)
+    area_factor = np.where(deg == 5, 5.0 / 6.0, 1.00)
+
+    weights_x = (dx / dist_sq) * area_factor[dst_nodes]
+    weights_y = (dy / dist_sq) * area_factor[dst_nodes]
 
     indices = torch.from_numpy(np.vstack([dst_nodes, src_nodes])).long()
     values_x = torch.from_numpy(weights_x).float()
@@ -65,8 +71,8 @@ class M4MeshOperators(nn.Module):
 class AIDASurrogateLoss(nn.Module):
     """
     High-Capacity Physics-Informed Multi-Objective Loss Function for AI-DA.
-    Integrates kinetic energy conservation, directional wind alignment,
-    3D horizontal momentum, non-hydrostatic vertical momentum, and mass continuity.
+    Integrates kinetic energy conservation, directional wind alignment, 3D horizontal momentum,
+    non-hydrostatic vertical momentum, mass continuity, and pentagonal vertex smoothing.
     """
     def __init__(
         self,
@@ -75,10 +81,11 @@ class AIDASurrogateLoss(nn.Module):
         w_conv: float = 0.05,
         w_wind_ke: float = 0.15,
         w_wind_dir: float = 0.10,
-        w_laplacian_p: float = 0.01,
+        w_laplacian_p: float = 0.05,
         w_dynamics: float = 0.001,
         w_vert_dynamics: float = 0.0001,
-        w_continuity: float = 0.0001,
+        w_continuity: float = 0.001,
+        w_pentagon_penalty: float = 0.10,
         w_joint_bias: float = 0.005,
         u_idx: int = 1,
         v_idx: int = 2,
@@ -95,6 +102,7 @@ class AIDASurrogateLoss(nn.Module):
         self.w_dynamics = w_dynamics
         self.w_vert_dynamics = w_vert_dynamics
         self.w_continuity = w_continuity
+        self.w_pentagon_penalty = w_pentagon_penalty
         self.w_joint_bias = w_joint_bias
 
         self.u_idx = u_idx
@@ -108,6 +116,56 @@ class AIDASurrogateLoss(nn.Module):
         self.register_buffer("std_ln_p", torch.tensor(1.20))
         self.register_buffer("mu_ln_rho", torch.tensor(0.20))
         self.register_buffer("std_ln_rho", torch.tensor(0.80))
+
+        # Dynamic cache for pentagon node mask
+        self.register_buffer("pentagon_mask_cache", None, persistent=False)
+
+    def compute_pentagon_smoothness_loss(
+        self,
+        pred: torch.Tensor,
+        edge_index: torch.Tensor,
+        graph_mesh_ops: M4MeshOperators
+    ) -> torch.Tensor:
+        """
+        Computes localized spatial variance loss strictly at the 12 pentagonal grid vertices:
+          L_pentagon = Mean[ ((P_pentagon - P_ring_mean)^2 + (T_pentagon - T_ring_mean)^2) ]
+        """
+        B, C, L, N = pred.shape
+
+        # Detect the 12 pentagonal valency-5 vertices once and cache
+        if self.pentagon_mask_cache is None or self.pentagon_mask_cache.shape[-1] != N:
+            deg = torch.zeros(N, dtype=torch.float32, device=pred.device)
+            deg.index_add_(0, edge_index[0], torch.ones(edge_index.shape[1], device=pred.device))
+            # Binary mask: 1.0 for degree == 5 nodes, 0.0 elsewhere
+            self.pentagon_mask_cache = (deg == 5.0).float().view(1, 1, N)
+
+        mask = self.pentagon_mask_cache  # [1, 1, N]
+
+        # Extract Temperature (channel 0) and Pressure (channel 6)
+        T_pred = pred[:, 0, :, :]  # [B, L, N]
+        P_pred = pred[:, self.p_idx, :, :]  # [B, L, N]
+
+        # Reshape for sparse matrix multiplication: [N, B * L]
+        T_flat = T_pred.permute(2, 0, 1).reshape(N, B * L)
+        P_flat = P_pred.permute(2, 0, 1).reshape(N, B * L)
+
+        # Compute 1-hop ring spatial gradients via Laplacian/Operator magnitude
+        grad_T_x = torch.sparse.mm(graph_mesh_ops.Gx_sparse, T_flat).reshape(N, B, L).permute(1, 2, 0)
+        grad_T_y = torch.sparse.mm(graph_mesh_ops.Gy_sparse, T_flat).reshape(N, B, L).permute(1, 2, 0)
+
+        grad_P_x = torch.sparse.mm(graph_mesh_ops.Gx_sparse, P_flat).reshape(N, B, L).permute(1, 2, 0)
+        grad_P_y = torch.sparse.mm(graph_mesh_ops.Gy_sparse, P_flat).reshape(N, B, L).permute(1, 2, 0)
+
+        # Isolated pentagon spatial derivative magnitude
+        pentagon_var_T = (grad_T_x**2 + grad_T_y**2) * mask
+        pentagon_var_P = (grad_P_x**2 + grad_P_y**2) * mask
+
+        # Mean loss computed only over pentagonal vertices
+        num_pentagons = torch.sum(mask) + 1e-6
+        loss_p_spike = torch.sum(pentagon_var_P) / (B * L * num_pentagons)
+        loss_t_spike = torch.sum(pentagon_var_T) / (B * L * num_pentagons)
+
+        return loss_p_spike + loss_t_spike
 
     def compute_momentum_residual_loss(
         self,
@@ -179,10 +237,7 @@ class AIDASurrogateLoss(nn.Module):
         graph_mesh_ops: M4MeshOperators,
         h_3d: torch.Tensor = None
     ) -> torch.Tensor:
-        """
-        Computes robust non-dimensionalized vertical momentum residuals using 
-        ideal gas thermodynamic log-pressure PGF scaling: (1/rho)*dP/dz = R_d * T * d(ln P)/dz.
-        """
+        """Computes non-dimensionalized vertical momentum residuals."""
         g = 9.80665
         R_d = 287.05
         R_earth = 6371000.0
@@ -196,10 +251,8 @@ class AIDASurrogateLoss(nn.Module):
         ln_T = pred[:, 0, :, :]
         ln_P = pred[:, self.p_idx, :, :]
 
-        # Absolute temperature (Kelvin)
         t_abs = torch.exp(ln_T * self.std_ln_t + self.mu_ln_t)
 
-        # 1. Level thickness dz (m)
         if h_3d is not None and h_3d.dim() == 4:
             dz = torch.abs(torch.diff(h_3d.squeeze(1), dim=1))
             dz = torch.clamp(dz, min=10.0)
@@ -207,18 +260,12 @@ class AIDASurrogateLoss(nn.Module):
         else:
             dz = 250.0
 
-        # 2. Thermodynamic Vertical Pressure Gradient Acceleration
-        # d(ln P)/dz via physical scale factor
         dln_P_dz = torch.diff(ln_P * self.std_ln_p + self.mu_ln_p, dim=1)
         dln_P_dz = torch.cat([dln_P_dz, dln_P_dz[:, -1:, :]], dim=1) / dz
 
-        # PGF Acceleration = - R_d * T * d(ln P)/dz
         pgf_w = -R_d * t_abs * dln_P_dz
-
-        # Hydrostatic acceleration imbalance relative to g
         hydrostatic_imbalance = (pgf_w - g) / g
 
-        # 3. Spatial Advection of vertical wind w
         w_flat = w.permute(2, 0, 1).reshape(N, B * L)
         dw_dx = torch.sparse.mm(graph_mesh_ops.Gx_sparse, w_flat).reshape(N, B, L).permute(1, 2, 0)
         dw_dy = torch.sparse.mm(graph_mesh_ops.Gy_sparse, w_flat).reshape(N, B, L).permute(1, 2, 0)
@@ -227,17 +274,13 @@ class AIDASurrogateLoss(nn.Module):
         dw_dz = torch.cat([dw_dz, dw_dz[:, -1:, :]], dim=1) / dz
 
         advection_w = ((u * dw_dx) + (v * dw_dy) + (w * dw_dz)) / g
-
-        # 4. Spherical Metric & Coriolis accelerations
         metric_centrifugal = (-(u**2 + v**2) / R_earth) / g
 
         cos_lat = torch.cos(graph_mesh_ops.lat_deg * (np.pi / 180.0)).to(pred.device)
         cos_lat = cos_lat.view(1, 1, N).expand(B, L, N)
         coriolis_w = (2.0 * Omega * u * cos_lat) / g
 
-        # 5. Combined Non-Dimensional Vertical Residual
         residual_w = advection_w - hydrostatic_imbalance + metric_centrifugal + coriolis_w
-
         return torch.mean(residual_w ** 2)
 
     def compute_continuity_residual_loss(
@@ -246,10 +289,7 @@ class AIDASurrogateLoss(nn.Module):
         graph_mesh_ops: M4MeshOperators,
         h_3d: torch.Tensor = None
     ) -> torch.Tensor:
-        """
-        Computes non-dimensionalized log-state mass continuity residuals:
-          R_cont = [ V·∇(ln rho) + ∇·V ] / (1e-4 s^-1)
-        """
+        """Computes non-dimensionalized log-state mass continuity residuals."""
         B, C, L, N = pred.shape
 
         u = pred[:, self.u_idx, :, :]
@@ -283,9 +323,7 @@ class AIDASurrogateLoss(nn.Module):
         advection_rho = (u * drho_dx) + (v * drho_dy) + (w * drho_dz)
         div_V = du_dx + dv_dy + dw_dz
 
-        # Normalize by typical synoptic divergence scale (1e-4 s^-1)
         residual_cont = (advection_rho + div_V) / 1e-4
-
         return torch.mean(residual_cont ** 2)
 
     def forward(
@@ -368,7 +406,19 @@ class AIDASurrogateLoss(nn.Module):
         else:
             metrics["loss_laplacian_p"] = 0.0
 
-        # 4. Log-State Mass Continuity Residual Loss
+        # 4. Pentagon Vertex Smoothness Penalty
+        if graph_mesh_ops is not None and self.w_pentagon_penalty > 0.0:
+            loss_pentagon = self.compute_pentagon_smoothness_loss(
+                pred=pred,
+                edge_index=edge_index,
+                graph_mesh_ops=graph_mesh_ops
+            )
+            total_loss += (self.w_pentagon_penalty * loss_pentagon)
+            metrics["loss_pentagon"] = loss_pentagon.item()
+        else:
+            metrics["loss_pentagon"] = 0.0
+
+        # 5. Log-State Mass Continuity Residual Loss
         if graph_mesh_ops is not None and self.w_continuity > 0.0:
             loss_continuity = self.compute_continuity_residual_loss(
                 pred=pred,
@@ -380,7 +430,7 @@ class AIDASurrogateLoss(nn.Module):
         else:
             metrics["loss_continuity"] = 0.0
 
-        # 5. Non-Hydrostatic Vertical Momentum Residual Loss
+        # 6. Non-Hydrostatic Vertical Momentum Residual Loss
         if graph_mesh_ops is not None and self.w_vert_dynamics > 0.0:
             loss_vert_dynamics = self.compute_vertical_momentum_residual_loss(
                 pred=pred,
@@ -392,7 +442,7 @@ class AIDASurrogateLoss(nn.Module):
         else:
             metrics["loss_vert_dynamics"] = 0.0
 
-        # 6. 3D Horizontal Navier-Stokes Momentum Residual Loss
+        # 7. 3D Horizontal Navier-Stokes Momentum Residual Loss
         if graph_mesh_ops is not None and self.w_dynamics > 0.0:
             loss_momentum = self.compute_momentum_residual_loss(
                 pred=pred,

@@ -17,36 +17,51 @@ import matplotlib.pyplot as plt
 
 def to_physical_units(var_name: str, val: np.ndarray) -> np.ndarray:
     """
-    Safely converts log-state variables back to physical units:
-    - ln_t: log(K) -> Kelvin
-    - ln_p: log(Pa) -> hPa (Pa / 100.0)
-    - ln_rho: log(kg/m3) -> kg/m3
+    Safely converts both normalized GNN model log-states and natural log truth fields back to physical units:
+    - Temperature: Kelvin (K)
+    - Pressure: hectopascals (hPa)
+    - Density: kg/m3
     """
     val = np.nan_to_num(val, nan=0.0)
     clean_var = var_name.replace('_icosahedral', '').lower()
 
-    # 1. Temperature (ln_t)
-    if 'ln_t' in clean_var or clean_var == 't':
-        if np.nanmean(val) < 10.0:  # If in log space
-            val = np.exp(np.clip(val, 5.0, 6.0))  # ~148 K to 403 K
-        return np.clip(val, 150.0, 350.0)
+    # 1. Temperature (T or log_T / ln_t)
+    if 't' in clean_var:
+        mean_v = np.nanmean(val)
+        if -5.0 <= mean_v <= 5.0:  # Model normalized log-state space: (ln_T - 5.50) / 0.15
+            ln_t = val * 0.15 + 5.50
+            return np.clip(np.exp(ln_t), 150.0, 350.0)
+        elif 5.0 < mean_v < 7.0:   # Natural log space: ln(T)
+            return np.clip(np.exp(val), 150.0, 350.0)
+        else:                      # Raw physical space: T (K)
+            return np.clip(val, 150.0, 350.0)
 
-    # 2. Pressure (ln_p) -> convert Pa to hPa
-    elif 'ln_p' in clean_var or clean_var == 'p':
-        if np.nanmean(val) < 15.0:  # If in log(Pa) space (e.g., ~11.52 for 101325 Pa)
-            val = np.exp(np.clip(val, 0.0, 12.0)) / 100.0  # Convert Pa to hPa
-        elif np.nanmean(val) > 10000.0:  # If raw Pa
-            val = val / 100.0
-        return np.clip(val, 0.01, 1100.0)
+    # 2. Pressure (P or log_P / ln_p)
+    elif 'p' in clean_var:
+        mean_v = np.nanmean(val)
+        if -5.0 <= mean_v <= 5.0:  # Model normalized log-state space: (ln_P - 10.50) / 1.20
+            ln_p = val * 1.20 + 10.50
+            p_pa = np.exp(ln_p)
+            return np.clip(p_pa / 100.0, 0.01, 1100.0)  # Convert Pa to hPa
+        elif 4.0 < mean_v < 13.0:  # Natural log space: ln(P_Pa)
+            return np.clip(np.exp(val) / 100.0, 0.01, 1100.0)
+        elif mean_v > 10000.0:     # Raw Pa
+            return np.clip(val / 100.0, 0.01, 1100.0)
+        else:                      # Raw hPa
+            return np.clip(val, 0.01, 1100.0)
 
-    # 3. Density (ln_rho)
-    elif 'ln_rho' in clean_var or clean_var == 'rho':
-        if np.nanmean(val) < 3.0:
-            val = np.exp(np.clip(val, -10.0, 2.0))
-        return np.clip(val, 1e-5, 3.0)
+    # 3. Density (rho or log_rho / ln_rho)
+    elif 'rho' in clean_var:
+        mean_v = np.nanmean(val)
+        if -5.0 <= mean_v <= 5.0:  # Model normalized log-state space: (ln_rho + 0.20) / 0.80
+            ln_rho = val * 0.80 - 0.20
+            return np.clip(np.exp(ln_rho), 1e-5, 3.0)
+        elif mean_v < 3.0:         # Natural log space
+            return np.clip(np.exp(val), 1e-5, 3.0)
+        else:                      # Raw physical space
+            return np.clip(val, 1e-5, 3.0)
 
     return val
-
 
 def evaluate_forecast(fcst_file: str, truth_file: str, csv_out: str, plot_out: str):
     if not os.path.exists(fcst_file):

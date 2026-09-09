@@ -9,7 +9,7 @@
 #SBATCH --nodes=1
 #SBATCH --time=00:05:00
 #SBATCH --output=log.forecast_%J.out
-#SBATCH --export=NONE
+#SBATCH --export=ALL
 
 # SVGHOME=/scratch4/NAGAPE/epic/Wei.Huang/src/starviewerweathermodel
 SVGHOME=/scratch5/purged/Wei.Huang/src/starviewerweathermodel
@@ -24,9 +24,7 @@ if [ -f checkpoints/aida_gnn.pt ]; then
    mv checkpoints/aida_gnn.pt checkpoints/aida_gnn_${n}.pt
 fi
 
-#gnn_chpt=saved_checkpoints/aida_gnn+vert_conv_amsu_iasi_hms.pt
-#gnn_chpt=saved_checkpoints/aida_gnn_epoch_015.pt
-gnn_chpt=checkpoints/aida_gnn_epoch_008.pt
+gnn_chpt=checkpoints/aida_gnn_epoch_025.pt
 
 init_date=20260101
 init_hour=12
