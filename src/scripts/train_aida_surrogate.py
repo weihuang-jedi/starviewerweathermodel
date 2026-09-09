@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
 scripts/train_aida_surrogate.py
--------------------------------
+--------------------------------
 AIDA GNN Surrogate Model Training Script for Icosahedral Atmospheric Grids.
 Supports terrain-following 3D height coordinates, static topography conditioning,
-4D observation-guided forecast dataset ingestion, conditional satellite operator execution,
-and verbose, real-time stdout progress flushing.
+4D observation-guided forecast dataset ingestion, conditional satellite operator execution
+(AMSU-A & IASI), 3D directional message passing, progress output flushing, and
+2-Step Push-Forward Autoregressive Rollout Training.
 """
 
 import argparse
@@ -13,8 +14,14 @@ import os
 import sys
 import time
 import yaml
+import warnings
+from datetime import datetime
 
-# Ensure parent directory is in Python path for 'models' package imports
+# Prevent C-library threading deadlocks in NetCDF4/HDF5/Zarr
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"
+
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 import torch
@@ -25,6 +32,7 @@ from models import (
     LogState4DForecastDataset,
     SyntheticAIDAStateDataset,
     generate_or_load_edge_index,
+    generate_vertical_edge_index,
     IcosahedralGNNSurrogate,
     AIDASurrogateLoss,
     M4MeshOperators,
@@ -39,6 +47,9 @@ from models.seviri import DifferentiableSEVIRIOperator
 from models.gsrasr import DifferentiableGSRASROperator
 from models.gsrcsr import DifferentiableGSRCSROperator
 from models.ahicsr import DifferentiableAHICSROperator
+
+# Suppress PyTorch AMP deprecation warnings globally
+warnings.filterwarnings("ignore", category=FutureWarning, module="torch.cuda.amp")
 
 
 def load_config(config_path: str) -> dict:
@@ -67,10 +78,11 @@ def save_checkpoint(filepath: str, model, optimizer, epoch: int, cfg: dict, crit
 
 def train_epoch(
     epoch: int, total_epochs: int, model, dataloader, optimizer, criterion, device,
-    edge_index, graph_mesh_ops, amsua_op, amsua_obs_err, iasi_op, iasi_obs_err,
+    edge_index, edge_index_vert, graph_mesh_ops, amsua_op, amsua_obs_err, iasi_op, iasi_obs_err,
     hms_op, hms_obs_err, atms_op, atms_obs_err, cris_op, cris_obs_err,
     seviri_op, seviri_obs_err, gsrasr_op, gsrasr_obs_err, gsrcsr_op, gsrcsr_obs_err,
-    ahicsr_op, ahicsr_obs_err, loss_cfg, accum_steps: int = 4, log_batch_freq: int = 50
+    ahicsr_op, ahicsr_obs_err, loss_cfg, accum_steps: int = 4, log_batch_freq: int = 50,
+    rollout_discount: float = 0.5
 ):
     model.train()
     epoch_losses = {}
@@ -83,10 +95,13 @@ def train_epoch(
     print(f"\n[TRAIN] >>> Starting Epoch {epoch:03d}/{total_epochs:03d} | Total Batches: {num_batches} <<<", flush=True)
 
     for batch_idx, batch_data in enumerate(dataloader):
-
         if isinstance(batch_data, dict):
-            x_batch = batch_data.get('input_trajectory', batch_data.get('background')).to(device)
-            y_batch = batch_data.get('target_state', batch_data.get('target')).to(device)
+            x_batch = batch_data.get('input_trajectory', batch_data.get('background', batch_data.get('background_0h'))).to(device)
+            y_batch = batch_data.get('target_state', batch_data.get('target', batch_data.get('target_analysis_0h'))).to(device)
+            y_batch_12h = batch_data.get('target_12h', None)
+            if y_batch_12h is not None:
+                y_batch_12h = y_batch_12h.to(device)
+
             valid_mask = batch_data.get('valid_mask', None)
             if valid_mask is not None:
                 valid_mask = valid_mask.to(device)
@@ -99,62 +114,68 @@ def train_epoch(
             if h_3d is not None:
                 h_3d = h_3d.to(device)
 
+            # Observations Extraction
             obs_amsua_tb = batch_data.get('obs_amsua_tb', None)
             obs_amsua_mask = batch_data.get('obs_amsua_mask', None)
             obs_iasi_tb = batch_data.get('obs_iasi_tb', None)
             obs_iasi_mask = batch_data.get('obs_iasi_mask', None)
-            obs_hms_tb = batch_data.get('obs_hms_tb', None)
-            obs_hms_mask = batch_data.get('obs_hms_mask', None)
-            obs_atms_tb = batch_data.get('obs_atms_tb', None)
-            obs_atms_mask = batch_data.get('obs_atms_mask', None)
-            obs_cris_tb = batch_data.get('obs_cris_tb', None)
-            obs_cris_mask = batch_data.get('obs_cris_mask', None)
-            obs_seviri_tb = batch_data.get('obs_seviri_tb', None)
-            obs_seviri_mask = batch_data.get('obs_seviri_mask', None)
-            obs_gsrasr_tb = batch_data.get('obs_gsrasr_tb', None)
-            obs_gsrasr_mask = batch_data.get('obs_gsrasr_mask', None)
-            obs_gsrcsr_tb = batch_data.get('obs_gsrcsr_tb', None)
-            obs_gsrcsr_mask = batch_data.get('obs_gsrcsr_mask', None)
-            obs_ahicsr_tb = batch_data.get('obs_ahicsr_tb', None)
-            obs_ahicsr_mask = batch_data.get('obs_ahicsr_mask', None)
+
+            # RESTORED: Conventional Observation Keys
             obs_conv_val = batch_data.get('obs_conv_val', None)
             obs_conv_mask = batch_data.get('obs_conv_mask', None)
         else:
             x_batch = batch_data[0].to(device)
             y_batch = batch_data[1].to(device)
+            y_batch_12h = None
             valid_mask, static_topo, h_3d = None, None, None
             obs_amsua_tb, obs_amsua_mask = None, None
             obs_iasi_tb, obs_iasi_mask = None, None
-            obs_hms_tb, obs_hms_mask = None, None
-            obs_atms_tb, obs_atms_mask = None, None
-            obs_cris_tb, obs_cris_mask = None, None
-            obs_seviri_tb, obs_seviri_mask = None, None
-            obs_gsrasr_tb, obs_gsrasr_mask = None, None
-            obs_gsrcsr_tb, obs_gsrcsr_mask = None, None
-            obs_ahicsr_tb, obs_ahicsr_mask = None, None
             obs_conv_val, obs_conv_mask = None, None
 
-        # GPU Input Sanitization
         x_batch = torch.nan_to_num(x_batch, nan=0.0, posinf=10.0, neginf=-10.0)
         y_batch = torch.nan_to_num(y_batch, nan=0.0, posinf=10.0, neginf=-10.0)
         if static_topo is not None:
             static_topo = torch.nan_to_num(static_topo, nan=0.0, posinf=1.0, neginf=0.0)
 
-        # GNN Forward Pass
-        pred = model(x_batch, edge_index, static_topo=static_topo)
+        # ---------------------------------------------------------------------
+        # ROLLOUT STEP 1: Predict t+6h state from initial x_batch
+        # ---------------------------------------------------------------------
+        pred = model(x_batch, edge_index, edge_index_vert=edge_index_vert, static_topo=static_topo)
         pred = torch.nan_to_num(pred, nan=0.0, posinf=10.0, neginf=-10.0)
 
-        # 1. Base Physical State Reconstruction Loss
         loss, metrics = criterion(
             pred=pred,
             target=y_batch,
             edge_index=edge_index,
+            edge_index_vert=edge_index_vert,
             graph_mesh_ops=graph_mesh_ops,
-            valid_mask=valid_mask
+            valid_mask=valid_mask,
+            h_3d=h_3d,
+            static_topo=static_topo
         )
         total_loss = loss
 
-        # Un-normalize physical profile fields for satellite forward operators
+        # ---------------------------------------------------------------------
+        # ROLLOUT STEP 2: Predict t+12h state from predicted t+6h state
+        # ---------------------------------------------------------------------
+        if y_batch_12h is not None:
+            pred_in_12h = torch.cat([pred, pred], dim=1) if pred.shape[1] == 7 else pred
+            pred_12h = model(pred_in_12h, edge_index, edge_index_vert=edge_index_vert, static_topo=static_topo)
+            pred_12h = torch.nan_to_num(pred_12h, nan=0.0, posinf=10.0, neginf=-10.0)
+
+            loss_12h, _ = criterion(
+                pred=pred_12h,
+                target=y_batch_12h,
+                edge_index=edge_index,
+                edge_index_vert=edge_index_vert,
+                graph_mesh_ops=graph_mesh_ops,
+                valid_mask=valid_mask,
+                h_3d=h_3d,
+                static_topo=static_topo
+            )
+            total_loss += (rollout_discount * loss_12h)
+
+        # Satellite Forward Operators
         std_t = getattr(criterion, "std_ln_t", 1.0)
         mu_t = getattr(criterion, "mu_ln_t", 0.0)
         std_p = getattr(criterion, "std_ln_p", 1.0)
@@ -167,7 +188,9 @@ def train_epoch(
         p_hpa = torch.clamp(torch.exp(ln_p_phys) / 100.0, min=0.01, max=1050.0)
         p_pa = p_hpa * 100.0
 
-        # 2. Conventional Observation Loss
+        op_kwargs = {"h_3d": h_3d} if h_3d is not None else {}
+
+        # Conventional Observation Loss
         w_conv = loss_cfg.get("w_conv", 0.05)
         if w_conv > 0.0 and obs_conv_val is not None:
             conv_val = torch.nan_to_num(obs_conv_val.to(device), nan=0.0)
@@ -182,54 +205,55 @@ def train_epoch(
         total_loss += (w_conv * loss_conv)
         metrics["loss_conv"] = loss_conv.item()
 
-        op_kwargs = {"h_3d": h_3d} if h_3d is not None else {}
-
-        # ---------------------------------------------------------------------
-        # CONDITIONAL SATELLITE RADIANCE LOSSES (Only run if weight > 0.0)
-        # ---------------------------------------------------------------------
-        # AMSU-A
-        w_rad_amsua = loss_cfg.get("w_rad_amsua", 0.0)
+        # AMSU-A Radiance Loss
+        w_rad_amsua = loss_cfg.get("w_rad_amsua", loss_cfg.get("w_rad", 0.01))
         if w_rad_amsua > 0.0 and obs_amsua_tb is not None:
             tb_sim = torch.nan_to_num(amsua_op(t_k, p_hpa, **op_kwargs), nan=240.0)
             tb_obs = torch.nan_to_num(obs_amsua_tb.to(device), nan=240.0)
-            if tb_sim.shape[1] != 15 and tb_sim.shape[2] == 15:
+
+            if tb_sim.dim() == 3 and tb_sim.shape[1] != 15 and tb_sim.shape[2] == 15:
                 tb_sim = tb_sim.permute(0, 2, 1)
-            if tb_obs.shape[1] != 15 and tb_obs.shape[2] == 15:
+            if tb_obs.dim() == 3 and tb_obs.shape[1] != 15 and tb_obs.shape[2] == 15:
                 tb_obs = tb_obs.permute(0, 2, 1)
+
             err = amsua_obs_err.view(1, 15, 1)
             innov = (tb_obs - tb_sim) / err
             if obs_amsua_mask is not None:
                 m = torch.nan_to_num(obs_amsua_mask.to(device), nan=0.0)
-                if m.shape[1] != 15 and m.shape[2] == 15:
+                if m.dim() == 3 and m.shape[1] != 15 and m.shape[2] == 15:
                     m = m.permute(0, 2, 1)
                 loss_rad_amsua = torch.sum((innov ** 2) * m) / (15.0 * torch.sum(m) + 1e-8)
             else:
                 loss_rad_amsua = torch.mean(innov ** 2) / 15.0
         else:
             loss_rad_amsua = torch.tensor(0.0, device=device)
+
         total_loss += (w_rad_amsua * loss_rad_amsua)
         metrics["loss_rad_amsua"] = loss_rad_amsua.item()
 
-        # IASI
-        w_rad_iasi = loss_cfg.get("w_rad_iasi", 0.0)
+        # IASI Radiance Loss
+        w_rad_iasi = loss_cfg.get("w_rad_iasi", loss_cfg.get("w_rad", 0.01))
         if w_rad_iasi > 0.0 and obs_iasi_tb is not None:
             tb_sim = torch.nan_to_num(iasi_op(t_k, p_pa, **op_kwargs), nan=240.0)
             tb_obs = torch.nan_to_num(obs_iasi_tb.to(device), nan=240.0)
-            if tb_obs.shape[1] != 30 and tb_obs.shape[2] == 30:
-                tb_obs = tb_obs.permute(0, 2, 1)
-            if tb_sim.shape[1] != 30 and tb_sim.shape[2] == 30:
+
+            if tb_sim.dim() == 3 and tb_sim.shape[1] != 30 and tb_sim.shape[2] == 30:
                 tb_sim = tb_sim.permute(0, 2, 1)
+            if tb_obs.dim() == 3 and tb_obs.shape[1] != 30 and tb_obs.shape[2] == 30:
+                tb_obs = tb_obs.permute(0, 2, 1)
+
             err = iasi_obs_err.view(1, 30, 1)
             innov = (tb_obs - tb_sim) / err
             if obs_iasi_mask is not None:
                 m = torch.nan_to_num(obs_iasi_mask.to(device), nan=0.0)
-                if m.shape[1] != 30 and m.shape[2] == 30:
+                if m.dim() == 3 and m.shape[1] != 30 and m.shape[2] == 30:
                     m = m.permute(0, 2, 1)
                 loss_rad_iasi = torch.sum((innov ** 2) * m) / (30.0 * torch.sum(m) + 1e-8)
             else:
                 loss_rad_iasi = torch.mean(innov ** 2) / 30.0
         else:
             loss_rad_iasi = torch.tensor(0.0, device=device)
+
         total_loss += (w_rad_iasi * loss_rad_iasi)
         metrics["loss_rad_iasi"] = loss_rad_iasi.item()
 
@@ -254,16 +278,19 @@ def train_epoch(
         for k, v in metrics.items():
             epoch_losses[k] += v / num_batches
 
-        # Real-time progress output flushing
         if (batch_idx + 1) % log_batch_freq == 0 or (batch_idx + 1) == num_batches:
             elapsed_batch_time = time.time() - batch_start_time
             rate = log_batch_freq / elapsed_batch_time if elapsed_batch_time > 0 else 0.0
             pct = ((batch_idx + 1) / num_batches) * 100.0
 
             print(
-                f"  ├─ [Epoch {epoch:03d}] Batch {batch_idx + 1:04d}/{num_batches:04d} ({pct:5.1f}%) | "
-                f"Total Loss: {metrics['loss_total']:.5e} | State MSE: {metrics.get('loss_mse', 0.0):.5e} | "
-                f"Speed: {rate:.2f} batch/s",
+                f"[Epoch {epoch:03d}] Batch {batch_idx + 1:04d}/{num_batches:04d} ({pct:5.1f}%)\n"
+                f"\tTotal Loss: {metrics['loss_total']:.5e}\n"
+                f"\t\tState MSE: {metrics.get('loss_mse', 0.0):.5e}\n"
+                f"\t\tMOMENTUM: {metrics.get('loss_momentum', 0.0):.5e}\n"
+                f"\t\tVertical MOMENTUM: {metrics.get('loss_vert_dynamics', 0.0):.5e}\n"
+                f"\t\tContinuity: {metrics.get('loss_continuity', 0.0):.5e}\n"
+                f"\t\tSpeed: {rate:.2f} batch/s",
                 flush=True
             )
             batch_start_time = time.time()
@@ -314,10 +341,17 @@ def train_model(cfg: dict):
     dataloader = DataLoader(dataset, batch_size=train_cfg["batch_size"], shuffle=True)
     print(f"[TRAIN] DataLoader created with {len(dataloader)} total batches.", flush=True)
 
-    print("[GRAPH] Setting up mesh connectivity edge index...", flush=True)
+    num_levels = mesh_cfg.get("num_levels", 32)
+
+    print("[GRAPH] Setting up mesh connectivity edge indices (Horizontal & Vertical)...", flush=True)
     edge_index = generate_or_load_edge_index(
         num_nodes=num_nodes,
         edge_file=paths["edges_path"]
+    ).to(device)
+
+    edge_index_vert = generate_vertical_edge_index(
+        num_nodes=num_nodes,
+        num_levels=num_levels
     ).to(device)
 
     print("[GRAPH] Pre-computing M4 mesh sparse differential operators (Grad/Div)...", flush=True)
@@ -332,10 +366,9 @@ def train_model(cfg: dict):
         lat_deg=lat_deg
     ).to(device)
 
-    num_levels = mesh_cfg.get("num_levels", 32)
     in_vars = model_cfg.get("in_vars", 14)
     out_vars = model_cfg.get("out_vars", 7)
-    num_static_feats = model_cfg.get("num_static_feats", 2)
+    num_static_feats = model_cfg.get("num_static_feats", 4)
 
     print("[MODEL] Building Icosahedral GNN Surrogate Network...", flush=True)
     model = IcosahedralGNNSurrogate(
@@ -347,9 +380,14 @@ def train_model(cfg: dict):
         num_layers=model_cfg.get("num_layers", 4)
     ).to(device)
 
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    total_params = sum(p.numel() for p in model.parameters())
+
+    print(f"[MODEL] Total Parameters    : {total_params:,}", flush=True)
+    print(f"[MODEL] Trainable Parameters: {trainable_params:,}", flush=True)
+
     criterion = AIDASurrogateLoss(num_levels=num_levels, **loss_cfg).to(device)
 
-    # Initialize Radiance Operators
     print("[MODEL] Initializing Satellite Radiance Operators...", flush=True)
     amsua_op = DifferentiableAMSUAOperator().to(device)
     amsua_obs_err = torch.tensor([
@@ -390,24 +428,17 @@ def train_model(cfg: dict):
     checkpoint_path = paths["checkpoint_path"]
     save_interval = train_cfg.get("save_interval", 5)
     epochs = train_cfg["epochs"]
-    log_interval = train_cfg["log_interval"]
+    log_interval = train_cfg.get("log_interval", 1)
     accum_steps = train_cfg.get("accum_steps", 4)
     log_batch_freq = train_cfg.get("log_batch_freq", 50)
 
-    print(f"[TRAIN] Active Satellite Weights: AMSU-A={loss_cfg.get('w_rad_amsua', 0.0)}, "
-          f"IASI={loss_cfg.get('w_rad_iasi', 0.0)}, ATMS={loss_cfg.get('w_rad_atms', 0.0)}", flush=True)
+    print(f"[TRAIN] Active Satellite Weights: AMSU-A={loss_cfg.get('w_rad_amsua', 0.05)}, "
+          f"IASI={loss_cfg.get('w_rad_iasi', 0.05)}, ATMS={loss_cfg.get('w_rad_atms', 0.0)}", flush=True)
 
     print("\n[TRAIN] Beginning Main Training Loop...", flush=True)
 
-    # Add Cosine Annealing Scheduler with Warmup
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer,
-        T_max=train_cfg["epochs"],
-        eta_min=1e-6
-    )
-
     start_epoch = 1
-    resume_ckpt = train_cfg.get("resume_checkpoint", None)
+    resume_ckpt = train_cfg.get("resume_checkpoint", checkpoint_path)
     if resume_ckpt and os.path.exists(resume_ckpt):
         print(f"[TRAIN] Resuming training from checkpoint: '{resume_ckpt}'", flush=True)
         ckpt_data = torch.load(resume_ckpt, map_location=device)
@@ -427,6 +458,7 @@ def train_model(cfg: dict):
             criterion=criterion,
             device=device,
             edge_index=edge_index,
+            edge_index_vert=edge_index_vert,
             graph_mesh_ops=graph_mesh_ops,
             amsua_op=amsua_op, amsua_obs_err=amsua_obs_err,
             iasi_op=iasi_op, iasi_obs_err=iasi_obs_err,
@@ -448,9 +480,9 @@ def train_model(cfg: dict):
                 f" EPOCH {epoch:03d}/{epochs:03d} SUMMARY LOSS BREAKDOWN\n"
                 f" " + "-" * 108 + "\n"
                 f"  TOTAL LOSS    : {epoch_losses.get('loss_total', 0.0):12.5e} | STATE MSE     : {epoch_losses.get('loss_mse', 0.0):12.5e}\n"
+                f"  WIND KE LOSS  : {epoch_losses.get('loss_wind_ke', 0.0):12.5e} | WIND DIR LOSS : {epoch_losses.get('loss_wind_dir', 0.0):12.5e}\n"
                 f"  CONV OBS LOSS : {epoch_losses.get('loss_conv', 0.0):12.5e} | LAPLACIAN P   : {epoch_losses.get('loss_laplacian_p', 0.0):12.5e}\n"
                 f"  AMSU-A RAD    : {epoch_losses.get('loss_rad_amsua', 0.0):12.5e} | IASI RAD      : {epoch_losses.get('loss_rad_iasi', 0.0):12.5e}\n"
-                f"  DYNAMICS LOSS : {epoch_losses.get('loss_dynamics_total', 0.0):12.5e}\n"
                 f"=" * 110 + "\n",
                 flush=True
             )

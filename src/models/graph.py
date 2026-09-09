@@ -33,3 +33,34 @@ def generate_or_load_edge_index(num_nodes: int, edge_file: str = "") -> torch.Te
             dst_list.append(n)
 
     return torch.tensor([src_list, dst_list], dtype=torch.long)
+
+def generate_vertical_edge_index(num_nodes: int, num_levels: int) -> torch.Tensor:
+    """
+    Generates bidirectional vertical edges for a 3D grid [Levels * Nodes].
+    Connects (level k, node i) with (level k+1, node i).
+    Returns edge_index of shape [2, 2 * num_nodes * (num_levels - 1)].
+    """
+    edges_src = []
+    edges_dst = []
+
+    for k in range(num_levels - 1):
+        level_k_offset = k * num_nodes
+        level_k_plus_1_offset = (k + 1) * num_nodes
+
+        nodes_k = torch.arange(num_nodes, dtype=torch.long) + level_k_offset
+        nodes_k_plus_1 = torch.arange(num_nodes, dtype=torch.long) + level_k_plus_1_offset
+
+        # Upward edges (k -> k+1)
+        edges_src.append(nodes_k)
+        edges_dst.append(nodes_k_plus_1)
+
+        # Downward edges (k+1 -> k)
+        edges_src.append(nodes_k_plus_1)
+        edges_dst.append(nodes_k)
+
+    edge_index_vert = torch.stack([
+        torch.cat(edges_src),
+        torch.cat(edges_dst)
+    ], dim=0)
+
+    return edge_index_vert

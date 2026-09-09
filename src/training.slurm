@@ -1,14 +1,14 @@
 #!/bin/bash
-#SBATCH --job-name=aida_training
+#SBATCH --job-name=svw_training
 #SBATCH --account=epic
 #SBATCH --gres=gpu:h100:1
 #SBATCH --mem=128G
 #SBATCH --nodes=1
 #SBATCH --partition=u1-h100
 #SBATCH --qos=gpuwf
-#SBATCH --time=10:45:00
+#SBATCH --time=23:45:00
 #SBATCH --output=log.training_%J.out
-#SBATCH --export=NONE
+#SBATCH --export=ALL
 
 # SVGHOME=/scratch4/NAGAPE/epic/Wei.Huang/src/starviewerweathermodel
 SVGHOME=/scratch5/purged/Wei.Huang/src/starviewerweathermodel
@@ -22,6 +22,9 @@ if [ -f checkpoints/aida_gnn_surrogate_logstate.pt ]; then
    done
    mv checkpoints/aida_gnn_surrogate_logstate.pt checkpoints/aida_gnn_surrogate_logstate_${n}.pt
 fi
+
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+#export CUDA_VISIBLE_DEVICES=0
 
 set -x
 

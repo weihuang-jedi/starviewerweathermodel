@@ -1,403 +1,303 @@
 #!/usr/bin/env python3
 """
 scripts/run_aida_forecast.py
-----------------------------
-Autoregressive Forecast Rollout Engine using the trained 4D Terrain-Following AIDA Checkpoint.
-Infers X_+6h, X_+12h, X_+18h... from initial analysis state pair (X_-6h, X_0)
-while conditioning on static topography (static_topo), 3D terrain heights (h_3d),
-and dynamic Solar Zenith Angle cos(SZA) solar forcing to eliminate hemisphere thermal drift.
-
-Guarantees physically valid output states by enforcing linear trend extrapolation baselines:
-    X_next = X_0 + (X_0 - X_-6h) + delta_X_GNN
+-----------------------------
+Autoregressive Evaluation & Inference Pipeline for AIDA GNN Model.
+Executes multi-step forecast rollouts and exports complete NetCDF files
+cloned directly from the truth/initial NetCDF dataset structure and attributes.
 """
 
-import argparse
 import os
 import sys
-import re
-import yaml
+import argparse
 import numpy as np
-import xarray as xr
+import netCDF4 as nc
 import torch
 
-# Ensure parent directory is in Python path
+# Ensure src directory is in path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from models.gnn import IcosahedralGNNSurrogate
-from models.graph import generate_or_load_edge_index
 
 
-def compute_solar_zenith_angle(
-    lats_deg: np.ndarray,
-    lons_deg: np.ndarray,
-    year: int = 2026,
-    month: int = 1,
-    day: int = 1,
-    hour_utc: float = 0.0
-) -> np.ndarray:
+def remove_pentagon_artifacts(field_3d, edge_index, num_nodes=40962, passes=2):
     """
-    Computes the cosine of the Solar Zenith Angle cos(SZA) across all mesh nodes.
-    
-    Returns:
-        np.ndarray: Array of shape (num_nodes,) with values in [0.0, 1.0].
-                    0.0 indicates nighttime (sun below horizon), >0.0 indicates daytime solar forcing.
+    Applies multi-pass 2-hop ring smoothing strictly to the 12 pentagonal nodes
+    and their immediate neighbor ring on a physical 3D field [Levels, Nodes].
     """
-    rad = np.pi / 180.0
+    src_raw, dst_raw = edge_index[0].cpu().numpy(), edge_index[1].cpu().numpy()
+    base_mask = (src_raw < num_nodes) & (dst_raw < num_nodes)
+    src, dst = src_raw[base_mask], dst_raw[base_mask]
 
-    # Calculate day of year (1 to 365)
-    from datetime import datetime
-    dt = datetime(year, month, day)
-    day_of_year = dt.timetuple().tm_yday
+    deg = np.bincount(dst, minlength=num_nodes)
+    pent_idx = np.where(deg == 5)[0]  # Exactly 12 pentagon nodes
 
-    # Solar declination angle (radians)
-    declination = 23.45 * np.sin(rad * (360.0 / 365.0) * (day_of_year - 81)) * rad
+    field_clean = field_3d.copy() if isinstance(field_3d, np.ndarray) else field_3d.clone()
 
-    # Solar Hour Angle (SHA) in radians
-    # Solar time = UTC_time + (longitude / 15.0 degrees per hour)
-    solar_time = hour_utc + (lons_deg / 15.0)
-    hour_angle = (solar_time - 12.0) * 15.0 * rad
+    for _ in range(passes):
+        for p_node in pent_idx:
+            # 1-hop neighbors
+            nbrs1 = src[dst == p_node]
+            if len(nbrs1) == 0:
+                nbrs1 = dst[src == p_node]
+            nbrs1 = np.unique(nbrs1)
 
-    lats_rad = lats_deg * rad
+            # 2-hop neighbors (neighbors of 1-hop nodes excluding the pentagon itself)
+            nbrs2_list = []
+            for n1 in nbrs1:
+                n2 = src[dst == n1]
+                nbrs2_list.extend(n2)
+            nbrs2 = np.unique(nbrs2_list)
+            nbrs2 = nbrs2[nbrs2 != p_node]
 
-    # Cosine Solar Zenith Angle formula: cos(SZA) = sin(lat)*sin(dec) + cos(lat)*cos(dec)*cos(HA)
-    cos_sza = np.sin(lats_rad) * np.sin(declination) + np.cos(lats_rad) * np.cos(declination) * np.cos(hour_angle)
+            # Smooth 1-hop ring nodes using 2-hop context
+            for n1 in nbrs1:
+                sub_nbrs = src[dst == n1]
+                sub_nbrs = sub_nbrs[sub_nbrs != p_node]
+                if len(sub_nbrs) > 0:
+                    if isinstance(field_clean, np.ndarray):
+                        field_clean[:, n1] = np.mean(field_clean[:, sub_nbrs], axis=-1)
+                    else:
+                        field_clean[:, n1] = torch.mean(field_clean[:, sub_nbrs], dim=-1)
 
-    # Day/Night thresholding: Sun above horizon
-    return np.maximum(0.0, cos_sza).astype(np.float32)
+            # Smooth center pentagon node
+            if isinstance(field_clean, np.ndarray):
+                field_clean[:, p_node] = np.mean(field_clean[:, nbrs1], axis=-1)
+            else:
+                field_clean[:, p_node] = torch.mean(field_clean[:, nbrs1], dim=-1)
 
+    return field_clean
 
-def load_state_from_file(file_path: str, var_names: list):
-    """Helper to extract dynamic 7-variable log-state tensor, 3D terrain heights, static topography, and coordinates."""
-    if not os.path.exists(file_path):
-        raise FileNotFoundError(f"[ERROR] Input state file not found: '{file_path}'")
+def remove_pentagon_artifacts_1hop(field_3d, edge_index, num_nodes=40962):
+    """
+    Applies 1-hop ring smoothing strictly to the 12 pentagonal nodes on a physical 3D field [Levels, Nodes].
+    """
+    src_raw, dst_raw = edge_index[0].cpu().numpy(), edge_index[1].cpu().numpy()
+    base_mask = (src_raw < num_nodes) & (dst_raw < num_nodes)
+    src, dst = src_raw[base_mask], dst_raw[base_mask]
 
-    if file_path.endswith('.zarr'):
-        ds = xr.open_zarr(file_path)
-    else:
-        ds = xr.open_dataset(file_path)
+    deg = np.bincount(dst, minlength=num_nodes)
+    pent_idx = np.where(deg == 5)[0]  # Exactly 12 nodes
 
-    # 1. Extract 7 dynamic state variables [7, Levels=32, Nodes]
-    state_vars = []
-    for v in var_names:
-        if v in ds:
-            val = ds[v].values
-        elif f"{v}_icosahedral" in ds:
-            val = ds[f"{v}_icosahedral"].values
+    field_clean = field_3d.copy() if isinstance(field_3d, np.ndarray) else field_3d.clone()
+
+    for p_node in pent_idx:
+        neighbors = src[dst == p_node]
+        if len(neighbors) == 0:
+            neighbors = dst[src == p_node]
+        neighbors = np.unique(neighbors)[:5]
+
+        if isinstance(field_clean, np.ndarray):
+            field_clean[:, p_node] = np.mean(field_clean[:, neighbors], axis=-1)
         else:
-            raise KeyError(f"[ERROR] Required state variable '{v}' missing in '{file_path}'")
+            field_clean[:, p_node] = torch.mean(field_clean[:, neighbors], dim=-1)
 
-        if val.ndim == 3:  # Squeeze time dimension if present
-            val = val[0]
-        state_vars.append(val)
-
-    state_np = np.stack(state_vars, axis=0).astype(np.float32)
-
-    # 2. Extract Coordinates (latitude, longitude)
-    lats = ds['latitude'].values if 'latitude' in ds else (ds['lat'].values if 'lat' in ds else np.linspace(-90, 90, state_np.shape[2]))
-    lons = ds['longitude'].values if 'longitude' in ds else (ds['lon'].values if 'lon' in ds else np.linspace(-180, 180, state_np.shape[2]))
-
-    if lats.ndim > 1:
-        lats = lats[0]
-    if lons.ndim > 1:
-        lons = lons[0]
-
-    # Ensure longitudes are in [-180, 180]
-    lons = np.where(lons > 180.0, lons - 360.0, lons)
-
-    # 3. Extract 3D Terrain-Following Geometric Heights h_3d [32, Nodes]
-    if 'h_icosahedral' in ds:
-        h_3d_np = ds['h_icosahedral'].values
-    elif 'h' in ds:
-        h_3d_np = ds['h'].values
-    else:
-        num_levels = state_np.shape[1]
-        num_nodes = state_np.shape[2]
-        baseline_h = np.linspace(2, 20000, num_levels, dtype=np.float32)
-        h_3d_np = np.repeat(baseline_h[:, np.newaxis], num_nodes, axis=1)
-
-    if h_3d_np.ndim == 3:
-        h_3d_np = h_3d_np[0]
-
-    # 4. Extract Static Surface Topography [2, Nodes] (Elevation + Land-Sea Mask)
-    if 'h_terrain_icosahedral' in ds:
-        h_terrain = ds['h_terrain_icosahedral'].values
-    elif 'h_terrain' in ds:
-        h_terrain = ds['h_terrain'].values
-    elif 'elevation' in ds:
-        h_terrain = ds['elevation'].values
-    else:
-        h_terrain = np.zeros((state_np.shape[2],), dtype=np.float32)
-
-    if 'land_sea_mask' in ds:
-        ls_mask = ds['land_sea_mask'].values
-    else:
-        ls_mask = np.zeros((state_np.shape[2],), dtype=np.float32)
-
-    if h_terrain.ndim > 1:
-        h_terrain = h_terrain[0]
-    if ls_mask.ndim > 1:
-        ls_mask = ls_mask[0]
-
-    static_topo_np = np.stack([h_terrain.astype(np.float32) / 10000.0, ls_mask.astype(np.float32)], axis=0)
-
-    return state_np, h_3d_np.astype(np.float32), static_topo_np, lats.astype(np.float32), lons.astype(np.float32), ds
+    return field_clean
 
 
-def parse_date_tag(filename: str) -> tuple[str, int, int, int, int]:
-    """Extracts date tag string, year, month, day, and base UTC hour from filename."""
-    match = re.search(r'(\d{4})(\d{2})(\d{2})\.t(\d{2})z', os.path.basename(filename))
-    if match:
-        year, month, day, hour = int(match.group(1)), int(match.group(2)), int(match.group(3)), int(match.group(4))
-        date_tag = match.group(0).replace('.nc', '')
-        return date_tag, year, month, day, hour
-    return "forecast", 2026, 1, 1, 0
+def load_logstate_file(filepath):
+    """
+    Loads initial NetCDF file into natural log-states [1, 7, 32, 40962]
+    and extracts static topography channels.
+    """
+    if not os.path.exists(filepath):
+        raise FileNotFoundError(f"[ERROR] Required file not found: '{filepath}'")
+
+    with nc.Dataset(filepath, "r") as ds:
+        var_spec = [
+            ["ln_t_icosahedral", "log_T", "ln_T", "T"],          # Ch 0: ln(T) ~ [5.10, 5.85]
+            ["u_icosahedral", "u", "U"],                         # Ch 1: u
+            ["v_icosahedral", "v", "V"],                         # Ch 2: v
+            ["w_icosahedral", "w", "W"],                         # Ch 3: w
+            ["q_icosahedral", "q", "Q"],                         # Ch 4: q
+            ["ln_rho_icosahedral", "log_rho", "ln_rho", "rho"], # Ch 5: ln(rho)
+            ["ln_p_icosahedral", "log_P", "ln_P", "P"]          # Ch 6: ln(P_Pa) ~ [4.60, 11.60]
+        ]
+
+        data_list = []
+        for aliases in var_spec:
+            found_key = next((k for k in aliases if k in ds.variables), None)
+            if found_key is None:
+                raise KeyError(f"[ERROR] Missing key {aliases} in '{filepath}'")
+
+            var_data = ds.variables[found_key][:]
+            if var_data.ndim == 2:
+                var_data = var_data[np.newaxis, ...]
+
+            # Convert raw physical variables to natural log IF necessary
+            if found_key == "T":
+                var_data = np.log(np.maximum(var_data, 100.0))
+            elif found_key == "P":
+                p_pa = var_data * 100.0 if np.mean(var_data) < 2000.0 else var_data
+                var_data = np.log(np.maximum(p_pa, 1.0))
+            elif found_key == "rho":
+                var_data = np.log(np.maximum(var_data, 1e-6))
+
+            data_list.append(var_data)
+
+        state = np.stack(data_list, axis=1)  # [1, 7, Levels, Nodes]
+
+        # Extract coordinates and terrain for static topo
+        lats = ds.variables["latitude"][:] if "latitude" in ds.variables else None
+        lons = ds.variables["longitude"][:] if "longitude" in ds.variables else None
+
+        num_nodes = state.shape[-1]
+        h_topo = ds.variables["h_terrain"][:] if "h_terrain" in ds.variables else (ds.variables["h_terrain_icosahedral"][:] if "h_terrain_icosahedral" in ds.variables else np.zeros(num_nodes))
+        lsm = ds.variables["land_sea_mask"][:] if "land_sea_mask" in ds.variables else np.zeros(num_nodes)
+
+        lat_norm = (lats / 90.0) if lats is not None else np.zeros(num_nodes)
+        lon_norm = (lons / 180.0) if lons is not None else np.zeros(num_nodes)
+
+        static_topo = np.stack([h_topo / 1000.0, lsm, lat_norm, lon_norm], axis=0)
+
+        return torch.from_numpy(state).float(), torch.from_numpy(static_topo).float()
 
 
-def export_lead_time_netcdf(
-    output_path: str,
-    state_arr: np.ndarray,
-    h_3d_np: np.ndarray,
-    static_topo_np: np.ndarray,
-    ds_ref: xr.Dataset,
-    var_names: list,
-    lead_time_hours: int,
-    num_levels: int,
-    num_nodes: int
-):
-    """Saves a single lead-time forecast state as a fully self-contained CF/UGRID NetCDF file."""
-    data_vars_out = {}
+def save_forecast_netcdf(output_filepath, pred_tensor, edge_index, template_filepath):
+    """
+    Clones global attributes, dimensions, coordinates, and topological variables
+    directly from template_filepath and writes model forecast fields in natural log space.
+    """
+    os.makedirs(os.path.dirname(output_filepath) or ".", exist_ok=True)
 
-    for idx, var in enumerate(var_names):
-        out_var_name = var if var.endswith("_icosahedral") else f"{var}_icosahedral"
-        data_vars_out[out_var_name] = (
-            ["level", "node"],
-            state_arr[idx, :, :].astype(np.float32),
-            {"long_name": f"Forecasted {var}", "mesh": "icosahedral_mesh"}
-        )
+    pred_data = pred_tensor.squeeze(0).cpu().numpy()  # [7, 32, 40962]
 
-    data_vars_out["h_icosahedral"] = (
-        ["level", "node"],
-        h_3d_np,
-        {"units": "meters", "long_name": "3D Terrain-Following Geometric Height Above Sea Level", "mesh": "icosahedral_mesh"}
-    )
-    data_vars_out["h_terrain_icosahedral"] = (
-        ["node"],
-        static_topo_np[0] * 10000.0,
-        {"units": "meters", "long_name": "Surface Topography Elevation", "mesh": "icosahedral_mesh"}
-    )
+    # 1. Pentagon 1-hop ring smoothing directly on natural log predictions
+    pred_data[0] = remove_pentagon_artifacts(pred_data[0], edge_index)  # ln(T)
+    pred_data[6] = remove_pentagon_artifacts(pred_data[6], edge_index)  # ln(P_Pa)
 
-    for static_var in ["longitude", "latitude", "face_nodes", "x_cartesian", "y_cartesian", "z_cartesian", "land_sea_mask", "elevation"]:
-        if static_var in ds_ref:
-            data_vars_out[static_var] = ds_ref[static_var]
+    with nc.Dataset(template_filepath, "r") as src, nc.Dataset(output_filepath, "w", format="NETCDF4") as dst:
+        # Clone Global Attributes
+        dst.setncatts({k: src.getncattr(k) for k in src.ncattrs()})
 
-    coords_out = {
-        "level": np.arange(1, num_levels + 1, dtype=np.int32),
-        "node": np.arange(num_nodes, dtype=np.int32)
-    }
+        # Clone Dimensions
+        for name, dimension in src.dimensions.items():
+            dst.createDimension(name, (len(dimension) if not dimension.isunlimited() else None))
 
-    if "face" in ds_ref.dims:
-        coords_out["face"] = ds_ref["face"].values
-    if "three" in ds_ref.dims:
-        coords_out["three"] = ds_ref["three"].values
+        # Copy non-dynamic variables (coordinates, mesh topology, terrain, elevation)
+        dynamic_fcst_keys = [
+            "ln_t_icosahedral", "ln_p_icosahedral", "ln_rho_icosahedral",
+            "u_icosahedral", "v_icosahedral", "w_icosahedral", "q_icosahedral"
+        ]
 
-    ds_out = xr.Dataset(
-        data_vars=data_vars_out,
-        coords=coords_out,
-        attrs={
-            "title": "AIDA GNN 4D Observation-Guided Terrain Weather Forecast",
-            "conventions": "CF-1.8 UGRID-1.0",
-            "forecast_lead_time_hours": lead_time_hours
+        for var_name, var in src.variables.items():
+            if var_name not in dynamic_fcst_keys:
+                out_var = dst.createVariable(var_name, var.datatype, var.dimensions)
+                out_var.setncatts({k: var.getncattr(k) for k in var.ncattrs()})
+                out_var[:] = var[:]
+
+        # Populate forecast dynamic fields with exact truth variable names and attributes
+        field_payload = {
+            "ln_t_icosahedral": pred_data[0],   # ln(T) in Kelvin
+            "u_icosahedral": pred_data[1],      # u wind
+            "v_icosahedral": pred_data[2],      # v wind
+            "w_icosahedral": pred_data[3],      # w velocity
+            "q_icosahedral": pred_data[4],      # specific humidity
+            "ln_rho_icosahedral": pred_data[5], # ln(rho) in kg/m3
+            "ln_p_icosahedral": pred_data[6],   # ln(P) in Pa
         }
-    )
 
-    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-    ds_out.to_netcdf(output_path, format="NETCDF4")
-    ds_out.close()
-    print(f"  ├─ Saved lead time f{lead_time_hours:03d}h -> '{output_path}'", flush=True)
+        for var_name, data_arr in field_payload.items():
+            if var_name in src.variables:
+                template_var = src.variables[var_name]
+                out_var = dst.createVariable(var_name, template_var.datatype, template_var.dimensions)
+                out_var.setncatts({k: template_var.getncattr(k) for k in template_var.ncattrs()})
+            else:
+                out_var = dst.createVariable(var_name, "f4", ("level", "node"))
+
+            out_var[:] = data_arr
+
+    print(f"[FORECAST] Exported full forecast step to: '{output_filepath}'")
 
 
-def run_autoregressive_forecast(
-    ckpt_path: str,
-    x_minus6_file: str,
-    x_zero_file: str,
-    edge_index_path: str,
-    forecast_steps: int = 4,
-    output_pattern: str = "output/aida.{date_tag}.f{lead:03d}.nc"
-):
+def run_forecast():
+    parser = argparse.ArgumentParser(description="AIDA GNN Autoregressive Forecast Runner")
+    parser.add_argument("-e", "--edge_index", type=str, required=True, help="Path to graph edge_index .pt file")
+    parser.add_argument("-k", "--checkpoint", type=str, required=True, help="Path to model checkpoint .pt file")
+    parser.add_argument("-s", "--steps", type=int, default=20, help="Number of 6-hour forecast rollout steps")
+    parser.add_argument("-m", "--m06h_file", type=str, required=True, help="Path to -6h initial logstate NetCDF file")
+    parser.add_argument("-z", "--zero_file", type=str, required=True, help="Path to 0h initial logstate NetCDF file")
+    parser.add_argument("-o", "--output_template", type=str, required=True, help="Output template string, e.g. fcst.f{lead:03d}.nc")
+
+    args = parser.parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"[FORECAST] Operating on compute device: {device}", flush=True)
+    print(f"[FORECAST] Operating on compute device: {device}")
 
-    print(f"[FORECAST] Loading checkpoint: '{ckpt_path}'", flush=True)
-    checkpoint = torch.load(ckpt_path, map_location=device)
-    cfg = checkpoint.get("config", {})
+    # 1. Load Topology Edge Index
+    edge_data = torch.load(args.edge_index, map_location=device)
+    if isinstance(edge_data, dict):
+        edge_index = edge_data["edge_index"].to(device)
+        edge_index_vert = edge_data.get("edge_index_vert", None)
+        if edge_index_vert is not None:
+            edge_index_vert = edge_index_vert.to(device)
+    else:
+        edge_index = edge_data.to(device)
+        edge_index_vert = None
 
-    model_cfg = cfg.get("model", {})
-    in_vars = model_cfg.get("in_vars", 14)
-    out_vars = model_cfg.get("out_vars", 7)
-    num_static_feats = model_cfg.get("num_static_feats", 3)
-    hidden_dim = model_cfg.get("hidden_dim", 128)
-    num_levels = cfg.get("mesh", {}).get("num_levels", 32)
-    num_layers = model_cfg.get("num_layers", 4)
+    # 2. Build and Load GNN Model
+    print(f"[FORECAST] Loading Model Checkpoint: '{args.checkpoint}'...")
+    checkpoint = torch.load(args.checkpoint, map_location=device)
+    state_dict = checkpoint.get("model_state_dict", checkpoint)
+
+    num_layers = 8 if any("gnn_layers.4" in k for k in state_dict.keys()) else 4
 
     model = IcosahedralGNNSurrogate(
-        in_vars=in_vars,
-        out_vars=out_vars,
-        num_static_feats=num_static_feats,
-        hidden_dim=hidden_dim,
-        num_levels=num_levels,
+        in_vars=14,
+        out_vars=7,
+        num_static_feats=4,
+        hidden_dim=256,
+        num_levels=32,
         num_layers=num_layers
     ).to(device)
 
-    model.load_state_dict(checkpoint['model_state_dict'])
+    missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
+    if unexpected_keys:
+        print(f"[FORECAST] Ignored non-matching keys: {unexpected_keys}")
     model.eval()
 
-    var_names = [
-        'ln_t_icosahedral', 'u_icosahedral', 'v_icosahedral',
-        'w_icosahedral', 'q_icosahedral', 'ln_rho_icosahedral', 'ln_p_icosahedral'
-    ]
+    # 3. Load Initial Background States (-6h and 0h)
+    print(f"[FORECAST] Ingesting -6h state: '{args.m06h_file}'")
+    print(f"[FORECAST] Ingesting  0h state: '{args.zero_file}'")
 
-    print(f"[FORECAST] Reading initial state X_-6h: '{x_minus6_file}'", flush=True)
-    x_m6_np, _, _, _, _, _ = load_state_from_file(x_minus6_file, var_names)
+    x_m6h, _ = load_logstate_file(args.m06h_file)
+    x_0h, static_topo = load_logstate_file(args.zero_file)
 
-    print(f"[FORECAST] Reading initial state X_0  : '{x_zero_file}'", flush=True)
-    x_0_np, h_3d_np, static_topo_np, lats_deg, lons_deg, ds_ref = load_state_from_file(x_zero_file, var_names)
+    x_m6h = x_m6h.to(device)
+    x_0h = x_0h.to(device)
+    static_topo = static_topo.to(device)
 
-    date_tag, base_year, base_month, base_day, base_hour_utc = parse_date_tag(x_zero_file)
-    num_nodes = x_0_np.shape[2]
-    edge_index = generate_or_load_edge_index(num_nodes=num_nodes, edge_file=edge_index_path).to(device)
+    # Combine into 14-channel initial condition: [1, 14, 32, 40962]
+    curr_input = torch.cat([x_m6h, x_0h], dim=1)
 
-    # Convert to Tensors: [Batch=1, Vars, Levels, Nodes]
-    state_prev = torch.from_numpy(x_m6_np).unsqueeze(0).to(device)
-    state_curr = torch.from_numpy(x_0_np).unsqueeze(0).to(device)
-    static_topo = torch.from_numpy(static_topo_np).unsqueeze(0).to(device)
-
-    print(f"\n" + "=" * 80)
-    print(f" STARTING {forecast_steps * 6}-HOUR TERRAIN-FOLLOWING FORECAST ROLLOUT")
-    print(f" Base Time Tag: {date_tag} (Year:{base_year}, Month:{base_month}, Day:{base_day}, Hour:{base_hour_utc:02d}z)")
-    print("=" * 80, flush=True)
-
-    # Save f000 Initial State
-    f000_path = output_pattern.format(date_tag=date_tag, lead=0)
-    export_lead_time_netcdf(
-        output_path=f000_path,
-        state_arr=x_0_np,
-        h_3d_np=h_3d_np,
-        static_topo_np=static_topo_np,
-        ds_ref=ds_ref,
-        var_names=var_names,
-        lead_time_hours=0,
-        num_levels=num_levels,
-        num_nodes=num_nodes
-    )
+    # 4. Autoregressive Rollout Loop
+    print(f"[FORECAST] Starting {args.steps}-step ({args.steps * 6} hours) Autoregressive Rollout...")
 
     with torch.no_grad():
-        for step in range(1, forecast_steps + 1):
+        for step in range(1, args.steps + 1):
             lead_hours = step * 6
-            current_hour_utc = (base_hour_utc + lead_hours) % 24
+            output_filepath = args.output_template.format(lead=lead_hours)
 
-            # Compute Dynamic Solar Zenith Angle Forcing cos(SZA) for current forecast hour
-            cos_sza_np = compute_solar_zenith_angle(
-                lats_deg=lats_deg,
-                lons_deg=lons_deg,
-                year=base_year,
-                month=base_month,
-                day=base_day,
-                hour_utc=current_hour_utc
+            # Predict next step log-state [1, 7, 32, 40962]
+            pred_next = model(
+                curr_input,
+                edge_index,
+                edge_index_vert=edge_index_vert,
+                static_topo=static_topo
             )
 
-            # Extract X_-6h and X_0 components for Linear Trend Baseline Computation
-            x_m6_curr = state_prev[:, 0:7, :, :] if state_prev.shape[1] >= 14 else state_prev
-            x_0_curr  = state_curr[:, 7:14, :, :] if state_curr.shape[1] >= 14 else state_curr
-
-            # Linear Trend Extrapolation: X_trend = X_0 + (X_0 - X_-6h)
-            x_trend = x_0_curr + (x_0_curr - x_m6_curr)
-
-            # Build 14-channel input trajectory
-            if state_prev.shape[1] == 7 and state_curr.shape[1] == 7:
-                input_traj = torch.cat([state_prev, state_curr], dim=1)
-            elif state_curr.shape[1] == 14:
-                input_traj = state_curr
-            else:
-                input_traj = torch.cat([state_prev[:, :7, :, :], state_curr[:, :7, :, :]], dim=1)
-
-            # Forward pass through GNN surrogate
-            out_model = model(input_traj, edge_index, static_topo=static_topo)
-
-            # -----------------------------------------------------------------
-            # 1. CLAMP 6-HOUR INCREMENT DELTAS (Damps Exponential Blow-ups)
-            # Maximum allowed 6-hour physical shifts:
-            # ln_T: ±0.035 (~10K), U/V: ±20 m/s, W: ±2 Pa/s, Q: ±0.005 kg/kg
-            # -----------------------------------------------------------------
-            delta_max = torch.tensor([0.035, 20.0, 20.0, 2.0, 0.005, 0.1, 0.02], device=device).view(1, 7, 1, 1)
-            out_model = torch.clamp(out_model, min=-delta_max, max=delta_max)
-
-            # Compute Next State: X_next = X_trend + delta_X
-            if torch.abs(out_model.mean()) < 1.0:
-                state_next = x_trend + out_model
-            else:
-                state_next = out_model
-
-            # -----------------------------------------------------------------
-            # 2. ABSOLUTE PHYSICAL BOUNDARY GUARDS
-            # Var order: [ln_T (0), U (1), V (2), W (3), Q (4), ln_RHO (5), ln_P (6)]
-            # -----------------------------------------------------------------
-            # Temperature T: clamp ln_T to [ln(180K), ln(330K)]
-            state_next[:, 0, :, :] = torch.clamp(state_next[:, 0, :, :], min=5.19295, max=5.79909)
-
-            # Winds U, V: clamp to [-90.0 m/s, +90.0 m/s]
-            state_next[:, 1, :, :] = torch.clamp(state_next[:, 1, :, :], min=-90.0, max=90.0)
-            state_next[:, 2, :, :] = torch.clamp(state_next[:, 2, :, :], min=-90.0, max=90.0)
-
-            # Specific Humidity Q: Strictly NON-NEGATIVE [0.0, 0.035 kg/kg]
-            state_next[:, 4, :, :] = torch.clamp(state_next[:, 4, :, :], min=0.0, max=0.035)
-
-            # Log Pressure ln_P: clamp to [ln(100Pa), ln(108000Pa)]
-            state_next[:, 6, :, :] = torch.clamp(state_next[:, 6, :, :], min=4.60517, max=11.58988)
-
-            next_np = state_next.cpu().numpy().squeeze(0)
-
-            # Export per-lead-time NetCDF
-            step_path = output_pattern.format(date_tag=date_tag, lead=lead_hours)
-            export_lead_time_netcdf(
-                output_path=step_path,
-                state_arr=next_np,
-                h_3d_np=h_3d_np,
-                static_topo_np=static_topo_np,
-                ds_ref=ds_ref,
-                var_names=var_names,
-                lead_time_hours=lead_hours,
-                num_levels=num_levels,
-                num_nodes=num_nodes
+            # Save NetCDF prediction cloned directly from zero_file
+            save_forecast_netcdf(
+                output_filepath,
+                pred_next,
+                edge_index,
+                template_filepath=args.zero_file
             )
 
-            # Shift state windows for next step
-            state_prev = state_curr
-            state_curr = state_next
+            # Shift state for next autoregressive step
+            curr_input = torch.cat([curr_input[:, 7:14, :, :], pred_next], dim=1)
 
-    ds_ref.close()
-    print(f"\n[SUCCESS] Multi-step forecast rollout complete! Exported {forecast_steps + 1} NetCDF files.\n", flush=True)
-
-
-def main():
-    parser = argparse.ArgumentParser(description="AIDA 4D Terrain-Following Autoregressive Forecast Engine")
-    parser.add_argument("-k", "--checkpoint", default="checkpoints/aida_gnn_surrogate_logstate.pt", help="Path to checkpoint")
-    parser.add_argument("-m", "--minus6", required=True, help="Path to X_-6h initial analysis state file")
-    parser.add_argument("-z", "--zero", required=True, help="Path to X_0 current initial analysis state file")
-    parser.add_argument("-e", "--edges", default="data/graph/icosahedral_edge_index_m6.pt", help="Path to graph edge index")
-    parser.add_argument("-s", "--steps", type=int, default=4, help="Number of 6h forecast steps (default: 4 = 24h)")
-    parser.add_argument("-o", "--output_pattern", default="output/aida.{date_tag}.f{lead:03d}.nc", help="Output path pattern")
-
-    args = parser.parse_args()
-
-    run_autoregressive_forecast(
-        ckpt_path=args.checkpoint,
-        x_minus6_file=args.minus6,
-        x_zero_file=args.zero,
-        edge_index_path=args.edges,
-        forecast_steps=args.steps,
-        output_pattern=args.output_pattern
-    )
+    print(f"[SUCCESS] Completed all {args.steps} rollout steps successfully!")
 
 
 if __name__ == "__main__":
-    main()
+    run_forecast()

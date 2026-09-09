@@ -12,19 +12,19 @@ paths:
 mesh:
   name: "icosahedral_m6"
   num_nodes: 40962
-  num_levels: 32
   samples: 100
 
 model:
-  hidden_dim: 256              # Increase hidden capacity from 128 -> 256
-  num_layers: 6                # Increase message-passing depth from 4 -> 6
+  hidden_dim: 256
+  num_layers: 8
+  num_levels: 32
   # Terrain-Following 4D Trajectory Architecture Parameters
   in_vars: 14          # Dynamic input channels (7 vars x 2 timesteps: X_-6h, X_0)
   out_vars: 7          # Output channels predicted (ln_t, u, v, w, q, ln_rho, ln_p for X_+6h)
-  num_static_feats: 3  # Static node features account for [elevation, land_sea_mask, cos_sza]
+  num_static_feats: 4  # Static node features account for [elevation, land_sea_mask, cos_sza]
 
 training:
-  epochs: 5
+  epochs: 30
   batch_size: 1        # Batch size per GPU (lowered to fit memory)
   accum_steps: 8       # Gradient accumulation steps (Effective batch size = 16)
   lr: 0.0003                   # Base Learning Rate
@@ -34,12 +34,29 @@ training:
   save_interval: 1
   log_batch_freq: 10
   # resume_checkpoint: "checkpoints/aida_gnn.pt"
+  # resume_checkpoint: saved_checkpoints/aida_gnn_epoch_015.pt
+  # resume_checkpoint: saved_checkpoints/aida_gnn_2026Aug31_epoch_020.pt
+  resume_checkpoint: checkpoints/aida_gnn_epoch_025.pt
 
 loss_weights:
   # Base Reconstruction & Physical Regularization
-  w_mse: 1.0
-  w_conv: 0.05
-  lambda_dyn: 0.0001           # Soft dynamics constraint to prevent early gradient explosion
+  w_mse: 10.0
+  w_wind_u: 2.5       # Boost U-wind gradient priority
+  w_wind_v: 5.0       # Boost V-wind gradient priority
+  w_wind_ke: 0.25     # Kinetic energy balance
+  w_wind_dir: 0.20    # Cosine direction alignment
+  # lambda_dyn: 0.0001           # Soft dynamics constraint to prevent early gradient explosion
+  lambda_dyn: 0.0002
+  # ---------------------------------------------------------------------------
+  # 3D NAVIER-STOKES & MASS CONTINUITY PHYSICS REGULARIZATION
+  # ---------------------------------------------------------------------------
+  w_dynamics: 0.001       # 3D Horizontal Navier-Stokes momentum residual loss
+  w_vert_dynamics: 0.0001 # Non-hydrostatic vertical momentum loss
+  w_continuity: 0.005     # Mass continuity loss
+
+  w_laplacian_p: 0.05       # Pressure spatial smoothness penalty
+  w_pentagon_penalty: 0.10  # Explicit 12-vertex local variance penalty
+
   weight_grad_state: 0.25
   lambda_p_acc: 0.15
   lambda_asym_p: 0.35
@@ -51,10 +68,12 @@ loss_weights:
   weight_joint_bias: 0.10
   tau_min_p: 0.08
 
+  # Conventional data
+  w_conv: 0.05
   # Differentiable Multi-Sensor Satellite Radiance Loss Weights (9 Instruments)
-  w_rad_amsua: 0.05    # AMSU-A Temperature Sounder
-  w_rad_iasi: 0.05     # IASI Hyperspectral Sounder
-  w_rad_hms: 0.00      # HMS Surface/Atmospheric Microwave Sounder
+  w_rad_amsua: 0.005    # AMSU-A Temperature Sounder
+  w_rad_iasi: 0.005     # IASI Hyperspectral Sounder
+  w_rad_hms: 0.005      # HMS Surface/Atmospheric Microwave Sounder
   w_rad_atms: 0.0     # ATMS Advanced Microwave Sounder
   w_rad_cris: 0.0     # CrIS Cross-track Infrared Sounder
   w_rad_seviri: 0.0   # SEVIRI Geostationary Sounder

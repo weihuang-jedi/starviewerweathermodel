@@ -2,12 +2,11 @@
 
 set -x
 
-lvl=10
-for var in T P U V
-do
-  python utils/plot_forecast_leadtime_series.py \
-    -v ${var} \
-    -l ${lvl} \
-    -o leadtime_series_${var}_L${lvl}.png
-done
+yyyymmdd=20260101
+fcsthour=12
+
+python utils/plot_forecast_leadtime_series.py \
+  --fcst_dir output/${yyyymmdd}/t${fcsthour}z \
+  --truth_dir ../data/icosahedral-truth \
+  --out_dir plots_leadtime/${yyyymmdd}/t${fcsthour}z -s
 
